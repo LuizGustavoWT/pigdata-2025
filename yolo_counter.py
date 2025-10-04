@@ -5,10 +5,25 @@ from pathlib import Path
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from utils_ffmpeg import split_into_chunks, concat_videos_mp4, probe_duration
+from cpu_tunning import tune_cpu_threads
+
+
+from functools import lru_cache
+from ultralytics import YOLO
+
+@lru_cache(maxsize=1)
+def get_model_ultra(weights="yolov8n.pt"):
+    # CPU only
+    m = YOLO(weights)
+    # nada de FP16 em CPU
+    return m
+
 
 def process_segment(video_path, line_norm, sample_fps, save_annotated, out_dir, time_offset=0.0, suffix=""):
-    """Processa UM arquivo (vídeo inteiro OU segmento) – sequência básica + vídeo anotado opcional."""
-    model = YOLO("yolov8m.pt")
+    from cpu_tunning import tune_cpu_threads
+    tune_cpu_threads(num_infer_threads=4, num_interop_threads=1, opencv_threads=1)
+
+    model = get_model_ultra("yolov8n.pt")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Não foi possível abrir o vídeo: {video_path}")
@@ -49,7 +64,7 @@ def process_segment(video_path, line_norm, sample_fps, save_annotated, out_dir, 
         out_idx += 1
         ts = out_idx / float(sample_fps) + float(time_offset)
 
-        results = model(frame, classes=[0], conf=0.4, iou=0.5, verbose=False)
+        results = model(frame, imgsz=448, classes=[0], conf=0.5, iou=0.5, verbose=False)
         dets = []
         if len(results):
             b = results[0].boxes
