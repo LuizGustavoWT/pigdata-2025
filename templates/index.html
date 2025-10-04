@@ -86,50 +86,100 @@
 
     <!-- Painel de status/resultados -->
     <!-- Painel de status/resultados -->
-<section class="card">
-  <h2>Status & Resultados</h2>
+  <section class="card">
+    <h2>Status & Resultados</h2>
 
-  <!-- status já como se tivesse concluído -->
-  <div id="status" class="status" data-state="ok">
-    ✅ Processamento concluído em 3min 24s
-  </div>
-
-  <div id="results" class="results">
-    <div class="numbers">
-      <div class="pill in"><span id="inCount">128</span><small>Entraram</small></div>
-      <div class="pill out"><span id="outCount">95</span><small>Saíram</small></div>
+    <!-- status já como se tivesse concluído -->
+    <div id="status" class="status" data-state="ok">
+      ✅ Processamento concluído em 3min 24s
     </div>
 
-    <div id="downloads" class="downloads">
-      <a href="#">⬇ Relatório CSV</a>
-      <a href="#" class="secondary">⬇ Vídeo anotado</a>
-    </div>
+    <div id="results" class="results">
+      <div class="numbers">
+        <div class="pill in"><span id="inCount">128</span><small>Entraram</small></div>
+        <div class="pill out"><span id="outCount">95</span><small>Saíram</small></div>
+      </div>
 
-    <div id="windowsWrap" class="windows">
-      <h3>Agregado por janelas</h3>
-      <div class="table-wrap">
-        <table id="windowsTable" aria-label="Tabela de janelas">
-          <thead>
-            <tr><th>Janela</th><th>IN</th><th>OUT</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>00:00–05:00</td><td>23</td><td>15</td></tr>
-            <tr><td>05:00–10:00</td><td>41</td><td>36</td></tr>
-            <tr><td>10:00–15:00</td><td>35</td><td>28</td></tr>
-            <tr><td>15:00–20:00</td><td>29</td><td>16</td></tr>
-          </tbody>
-        </table>
+      <div id="downloads" class="downloads">
+        <a href="#">⬇ Relatório CSV</a>
+        <a href="#" class="secondary">⬇ Vídeo anotado</a>
+      </div>
+
+      <div id="windowsWrap" class="windows">
+        <h3>Agregado por janelas</h3>
+        <div class="table-wrap">
+          <table id="windowsTable" aria-label="Tabela de janelas">
+            <thead>
+              <tr><th>Janela</th><th>IN</th><th>OUT</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>00:00–05:00</td><td>23</td><td>15</td></tr>
+              <tr><td>05:00–10:00</td><td>41</td><td>36</td></tr>
+              <tr><td>10:00–15:00</td><td>35</td><td>28</td></tr>
+              <tr><td>15:00–20:00</td><td>29</td><td>16</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- <div id="annotatedWrap" class="video-out">
+        <h3>Vídeo anotado</h3>
+        <video id="annotatedVideo" controls>
+          <source src="/video1." type="video/mp4">
+        </video>
+      </div> -->
+    </div>  
+  </section>
+
+  <section class="card">
+    <h2>Cálculo de Custo</h2>
+    
+    <label for="precoLitro">Preço por litro (R$):</label>
+    <input type="number" step="0.01" id="precoLitro" placeholder="Ex: 5.50"><br><br>
+
+    <div class="columns">
+      <div class="column">
+        <h3>Micro Ônibus</h3>
+        <label for="kmRodadosMicro">Km rodados no mês:</label>
+        <input type="number" id="kmRodadosMicro" placeholder="Ex: 1000"><br><br>
+
+        <label for="litrosPorKmMicro">Litros usados por km:</label>
+        <input type="number" step="0.01" id="litrosPorKmMicro" placeholder="Ex: 0.1"><br><br>
+
+        <label for="custoPorKmManutencaoMicro">Custo manutenção por km (R$):</label>
+        <input type="number" step="0.01" id="custoPorKmManutencaoMicro" placeholder="Ex: 0.50"><br><br>
+
+        <button onclick="calcularMicro()">Calcular</button>
+
+        <h3>Resultados:</h3>
+        <p><strong>Consumo total (litros):</strong> <span id="consumoTotalMicro">-</span></p>
+        <p><strong>Custo total de combustível (R$):</strong> <span id="custoTotalCombustivelMicro">-</span></p>
+        <p><strong>Custo por km (R$):</strong> <span id="custoPorKmMicro">-</span></p>
+        <p><strong>Custo total (R$):</strong> <span id="custoTotalMicro">-</span></p>   
+      </div>
+
+      <div class="column">
+        <h3>Mid Ônibus</h3>
+        <label for="kmRodadosMid">Km rodados no mês:</label>
+        <input type="number" id="kmRodadosMid" placeholder="Ex: 1000"><br><br>
+
+        <label for="litrosPorKmMid">Litros usados por km:</label>
+        <input type="number" step="0.01" id="litrosPorKmMid" placeholder="Ex: 0.1"><br><br>
+
+        <label for="custoPorKmManutencaoMid">Custo manutenção por km (R$):</label>
+        <input type="number" step="0.01" id="custoPorKmManutencaoMid" placeholder="Ex: 0.50"><br><br>
+
+        <button onclick="calcularMid()">Calcular</button>
+
+        <h3>Resultados:</h3>
+        <p><strong>Consumo total (litros):</strong> <span id="consumoTotalMid">-</span></p>
+        <p><strong>Custo total de combustível (R$):</strong> <span id="custoTotalCombustivelMid">-</span></p>
+        <p><strong>Custo por km (R$):</strong> <span id="custoPorKmMid">-</span></p>
+        <p><strong>Custo total (R$):</strong> <span id="custoTotalMid">-</span></p>   
       </div>
     </div>
-
-    <!-- <div id="annotatedWrap" class="video-out">
-      <h3>Vídeo anotado</h3>
-      <video id="annotatedVideo" controls>
-        <source src="/video1." type="video/mp4">
-      </video>
-    </div> -->
-  </div>
-</section>
+        
+  </section>
 
   </main>
 
