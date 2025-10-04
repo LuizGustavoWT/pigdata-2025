@@ -1,280 +1,242 @@
-const form = document.getElementById('uploadForm');
-const statusDiv = document.getElementById('status');
-const summaryDiv = document.getElementById('summary');
-const jsonPre = document.getElementById('json');
+const $ = (sel) => document.querySelector(sel);
+const statusBox = $("#status");
+const resultsBox = $("#results");
+const inCount = $("#inCount");
+const outCount = $("#outCount");
+const windowsWrap = $("#windowsWrap");
+const windowsTableBody = $("#windowsTable tbody");
+const downloads = $("#downloads");
+const annotatedWrap = $("#annotatedWrap");
+const annotatedVideo = $("#annotatedVideo");
 
-const videoInput = document.getElementById('videoInput');
-const hiddenVideo = document.getElementById('hiddenVideo');
-const canvas = document.getElementById('drawCanvas');
-const ctx = canvas.getContext('2d');
+const videoInput = $("#video");
+const videoEl = $("#videoPreview");
+const overlay = $("#overlay");
+const ctx = overlay.getContext("2d");
+const hint = document.querySelector(".overlay-hint");
 
-const coordPreview = document.getElementById('coordPreview');
-const btnReset = document.getElementById('btnReset');
-const btnFlip = document.getElementById('btnFlip');
+const x1 = $("#x1"), y1 = $("#y1"), x2 = $("#x2"), y2 = $("#y2");
+const btnProcess = $("#btnProcess");
+const btnStream = $("#btnStream");
 
-const x1El = document.getElementById('x1');
-const y1El = document.getElementById('y1');
-const x2El = document.getElementById('x2');
-const y2El = document.getElementById('y2');
+let clickState = 0; // 0->aguardando p1, 1->aguardando p2
+let naturalWidth = 0, naturalHeight = 0;
 
-let hasFrame = false;
-let drawing = false;
-let pA = null; // {x,y} em pixels de canvas
-let pB = null;
-
-function clearCanvas() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+function setStatus(msg){ statusBox.textContent = msg; }
+function toggleBusy(isBusy){
+  btnProcess.disabled = isBusy;
+  btnStream.disabled = isBusy;
 }
 
-function drawFrameToCanvas() {
-  const vw = hiddenVideo.videoWidth;
-  const vh = hiddenVideo.videoHeight;
-  if (!vw || !vh) return;
+function drawLinePreview(){
+  ctx.clearRect(0,0,overlay.width,overlay.height);
+  if (!naturalWidth || !naturalHeight) return;
 
-  // Redimensiona o canvas para manter a proporção do vídeo dentro do tamanho atual do canvas
-  // Aqui vamos preencher o canvas mantendo proporção (letterbox se necessário)
-  const targetW = canvas.clientWidth || canvas.width;
-  const aspect = vw / vh;
-  // Ajusta tamanho real (atributos width/height) para evitar blur
-  canvas.width = Math.round(targetW);
-  canvas.height = Math.round(targetW / aspect);
+  const p1 = {
+    x: parseFloat(x1.value) * overlay.width,
+    y: parseFloat(y1.value) * overlay.height
+  };
+  const p2 = {
+    x: parseFloat(x2.value) * overlay.width,
+    y: parseFloat(y2.value) * overlay.height
+  };
 
-  ctx.drawImage(hiddenVideo, 0, 0, canvas.width, canvas.height);
-  hasFrame = true;
-  redrawLine();
+  // linha "grossa"
+  ctx.strokeStyle = "rgba(255,215,0,0.95)";
+  ctx.lineWidth = 8;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(p1.x, p1.y);
+  ctx.lineTo(p2.x, p2.y);
+  ctx.stroke();
+
+  // alças
+  ctx.fillStyle = "#0a2f6b";
+  [p1,p2].forEach(p=>{
+    ctx.beginPath(); ctx.arc(p.x,p.y,6,0,Math.PI*2); ctx.fill();
+  });
 }
 
-function redrawLine() {
-  if (!hasFrame) return;
-  // redesenha o frame atual do vídeo como fundo
-  ctx.drawImage(hiddenVideo, 0, 0, canvas.width, canvas.height);
+function resizeOverlay(){
+  const rect = videoEl.getBoundingClientRect();
+  overlay.width = rect.width;
+  overlay.height = rect.height;
+  drawLinePreview();
+}
 
-  if (pA && pB) {
-    // linha
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = '#FFD400';
-    ctx.beginPath();
-    ctx.moveTo(pA.x, pA.y);
-    ctx.lineTo(pB.x, pB.y);
-    ctx.stroke();
+function setPointsFromClick(ev){
+  if (!naturalWidth || !naturalHeight) return;
+  const r = overlay.getBoundingClientRect();
+  const nx = (ev.clientX - r.left) / r.width;
+  const ny = (ev.clientY - r.top) / r.height;
 
-    // pontos
-    ctx.fillStyle = '#0d6efd';
-    ctx.beginPath(); ctx.arc(pA.x, pA.y, 6, 0, Math.PI*2); ctx.fill();
-
-    ctx.fillStyle = '#dc3545';
-    ctx.beginPath(); ctx.arc(pB.x, pB.y, 6, 0, Math.PI*2); ctx.fill();
+  if (clickState === 0){
+    x1.value = clamp(nx,0,1).toFixed(3);
+    y1.value = clamp(ny,0,1).toFixed(3);
+    clickState = 1;
+    hint.textContent = "Agora clique no segundo ponto da linha";
+  } else {
+    x2.value = clamp(nx,0,1).toFixed(3);
+    y2.value = clamp(ny,0,1).toFixed(3);
+    clickState = 0;
+    hint.textContent = "Clique 2x para redefinir a linha";
   }
-
-  updateHiddenInputs();
+  drawLinePreview();
 }
 
-function updateHiddenInputs() {
-  if (!pA || !pB || !hasFrame) {
-    x1El.value = ''; y1El.value = ''; x2El.value = ''; y2El.value = '';
-    coordPreview.textContent = 'x1=— y1=— | x2=— y2=—';
-    return;
-  }
-  // normaliza 0..1 relativamente ao tamanho atual do canvas
-  const x1n = (pA.x / canvas.width);
-  const y1n = (pA.y / canvas.height);
-  const x2n = (pB.x / canvas.width);
-  const y2n = (pB.y / canvas.height);
+function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
 
-  x1El.value = x1n.toFixed(4);
-  y1El.value = y1n.toFixed(4);
-  x2El.value = x2n.toFixed(4);
-  y2El.value = y2n.toFixed(4);
-
-  coordPreview.textContent = `x1=${x1El.value} y1=${y1El.value} | x2=${x2El.value} y2=${y2El.value}`;
-}
-
-function setLine(a, b) {
-  pA = a ? {x: a.x, y: a.y} : null;
-  pB = b ? {x: b.x, y: b.y} : null;
-  redrawLine();
-}
-
-function flipLine() {
-  if (pA && pB) {
-    const tmp = pA; pA = pB; pB = tmp;
-    redrawLine();
-  }
-}
-
-btnReset.addEventListener('click', () => setLine(null, null));
-btnFlip.addEventListener('click', flipLine);
-
-// Eventos de desenho
-canvas.addEventListener('mousedown', (e) => {
-  if (!hasFrame) return;
-  const r = canvas.getBoundingClientRect();
-  const x = e.clientX - r.left;
-  const y = e.clientY - r.top;
-  drawing = true;
-  setLine({x, y}, null);
+["input","change"].forEach(evt=>{
+  [x1,y1,x2,y2].forEach(el=>el.addEventListener(evt, drawLinePreview));
 });
+window.addEventListener("resize", resizeOverlay);
+overlay.addEventListener("click", setPointsFromClick);
 
-canvas.addEventListener('mousemove', (e) => {
-  if (!drawing || !hasFrame) return;
-  const r = canvas.getBoundingClientRect();
-  const x = e.clientX - r.left;
-  const y = e.clientY - r.top;
-  pB = {x, y};
-  redrawLine();
-});
-
-window.addEventListener('mouseup', () => { drawing = false; });
-
-// Suporte básico a touch
-canvas.addEventListener('touchstart', (e) => {
-  if (!hasFrame) return;
-  const t = e.touches[0];
-  const r = canvas.getBoundingClientRect();
-  setLine({x: t.clientX - r.left, y: t.clientY - r.top}, null);
-  e.preventDefault();
-});
-canvas.addEventListener('touchmove', (e) => {
-  if (!hasFrame || !pA) return;
-  const t = e.touches[0];
-  const r = canvas.getBoundingClientRect();
-  pB = {x: t.clientX - r.left, y: t.clientY - r.top};
-  redrawLine();
-  e.preventDefault();
-});
-canvas.addEventListener('touchend', () => { /* nada */ });
-
-// Carrega primeiro frame do vídeo selecionado
-videoInput.addEventListener('change', async () => {
+// Preview do vídeo selecionado
+videoInput.addEventListener("change", () => {
   const file = videoInput.files?.[0];
   if (!file) return;
-  setLine(null, null);
 
   const url = URL.createObjectURL(file);
-  hiddenVideo.src = url;
-  hiddenVideo.currentTime = 0;
-
-  // aguarda metadados para saber dimensões
-  await hiddenVideo.play().catch(()=>{});
-  hiddenVideo.pause();
-
-  // tenta capturar o frame em ~0.1s para evitar quadros pretos
-  hiddenVideo.currentTime = 0.1;
-  hiddenVideo.addEventListener('seeked', onSeekedOnce, { once: true });
+  videoEl.src = url;
+  videoEl.onloadedmetadata = () => {
+    naturalWidth = videoEl.videoWidth;
+    naturalHeight = videoEl.videoHeight;
+    resizeOverlay();
+  };
 });
 
-function onSeekedOnce() {
-  drawFrameToCanvas();
-}
+// ---- Submissões ----
+async function submitCommon(stream = false){
+  const file = videoInput.files?.[0];
+  if(!file){ setStatus("Selecione um vídeo para processar."); return; }
 
-// Redesenha ao redimensionar janela (recalcula canvas e re-exibe frame/linha)
-window.addEventListener('resize', () => {
-  if (hasFrame) drawFrameToCanvas();
-});
+  const form = new FormData();
+  form.append("video", file);
+  form.append("x1", x1.value);
+  form.append("y1", y1.value);
+  form.append("x2", x2.value);
+  form.append("y2", y2.value);
+  form.append("sample_fps", $("#sample_fps").value);
+  form.append("save_annotated", $("#save_annotated").checked ? "1" : "0");
+  form.append("chunk_seconds", $("#chunk_seconds").value);
+  form.append("workers", $("#workers").value);
 
-// Submissão do formulário
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
+  resultsBox.classList.add("hidden");
+  annotatedWrap.classList.add("hidden");
+  windowsWrap.classList.add("hidden");
+  downloads.innerHTML = "";
+  inCount.textContent = "0";
+  outCount.textContent = "0";
 
-  statusDiv.textContent = 'Processando (stream) …';
-  summaryDiv.innerHTML = '';
-  jsonPre.textContent = '';
+  toggleBusy(true);
+  setStatus(stream ? "Processando em streaming…" : "Processando…");
 
-  const fd = new FormData(form);
+  try{
+    if(!stream){
+      const resp = await fetch("/upload",{ method:"POST", body: form });
+      const data = await resp.json();
+      handleFinal(data);
+    }else{
+      // streaming
+      // parâmetros extras
+      form.append("window_minutes","5");
+      form.append("clock_start","");
 
-  // Use /upload_stream para receber eventos parciais
-  const resp = await fetch('/upload_stream', { method: 'POST', body: fd });
-  if (!resp.ok || !resp.body) {
-    statusDiv.textContent = 'Erro ❌';
-    jsonPre.textContent = 'Falha ao iniciar streaming';
-    return;
-  }
+      const resp = await fetch("/upload_stream",{ method:"POST", body: form });
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
 
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let totalsIn = 0, totalsOut = 0;
-  const chunkRows = []; // para tabela de chunks
-  let finalData = null;
-
-  function renderPartial() {
-    // desenha um resumo parcial simples dos chunks processados
-    let html = `<div class="pill">IN parcial: <strong>${totalsIn}</strong></div>
-                <div class="pill">OUT parcial: <strong>${totalsOut}</strong></div>`;
-    if (chunkRows.length) {
-      html += `<table border="1" cellpadding="6" cellspacing="0" style="margin-top:8px;">
-        <tr><th>Chunk</th><th>Janela</th><th>IN</th><th>OUT</th></tr>
-        ${chunkRows.map(r => `<tr><td>${r.index}</td><td>${r.label}</td><td>${r.in}</td><td>${r.out}</td></tr>`).join('')}
-      </table>`;
-    }
-    summaryDiv.innerHTML = html;
-  }
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    // processa por linhas
-    let idx;
-    while ((idx = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, idx).trim();
-      buffer = buffer.slice(idx + 1);
-      if (!line) continue;
-
-      let ev;
-      try { ev = JSON.parse(line); } catch { continue; }
-
-      if (ev.event === 'start') {
-        statusDiv.textContent = 'Processando (chunks chegando)…';
-      } else if (ev.event === 'chunk_result') {
-        // acumula parciais
-        totalsIn += ev.in || 0;
-        totalsOut += ev.out || 0;
-        const toMMSS = (sec) => {
-          const m = Math.floor(sec/60), s = Math.floor(sec%60);
-          return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-        };
-        chunkRows.push({
-          index: ev.index,
-          label: `${toMMSS(ev.startSec)}-${toMMSS(ev.endSec)}`,
-          in: ev.in, out: ev.out
-        });
-        renderPartial();
-      } else if (ev.event === 'final') {
-        finalData = ev;
-      } else if (ev.event === 'error') {
-        statusDiv.textContent = 'Erro ❌';
-        jsonPre.textContent = ev.detail || 'Erro no streaming';
+      while(true){
+        const {value, done} = await reader.read();
+        if(done) break;
+        buf += decoder.decode(value, {stream:true});
+        let lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for(const line of lines){
+          if(!line.trim()) continue;
+          const ev = JSON.parse(line);
+          if(ev.event === "start"){
+            setStatus("Iniciado…");
+          }else if(ev.event === "chunk_result"){
+            setStatus(`Chunk ${ev.index}: IN ${ev.in} / OUT ${ev.out}`);
+          }else if(ev.event === "final"){
+            handleFinal(ev);
+          }else if(ev.event === "error"){
+            setStatus("Erro: " + ev.detail);
+          }
+        }
       }
     }
+  }catch(e){
+    setStatus("Erro ao enviar/processar: " + e.message);
+  }finally{
+    toggleBusy(false);
+  }
+}
+
+function handleFinal(payload){
+  if(payload.error){
+    setStatus("Erro: " + (payload.detail || payload.error));
+    return;
+  }
+  setStatus("Concluído!");
+  resultsBox.classList.remove("hidden");
+
+  if(payload.totals){
+    inCount.textContent = payload.totals.in ?? 0;
+    outCount.textContent = payload.totals.out ?? 0;
   }
 
-  // render final
-  if (finalData) {
-    statusDiv.textContent = 'Concluído ✅';
-    const s = finalData.totals || {};
-    const linkVid = finalData.annotated_video_url ? `<a class="pill" href="${finalData.annotated_video_url}" target="_blank">Baixar vídeo anotado</a>` : '';
+  downloads.innerHTML = "";
+  if(payload.annotated_video_url){
+    const a = document.createElement("a");
+    a.href = payload.annotated_video_url;
+    a.textContent = "Baixar vídeo anotado";
+    downloads.appendChild(a);
 
-    let windowsHtml = '';
-    if (finalData.windows && finalData.windows.length) {
-      windowsHtml = `<h4>Faixas de horário</h4>
-      <table border="1" cellpadding="6" cellspacing="0">
-        <tr><th>Janela</th><th>Entraram (IN)</th><th>Sairam (OUT)</th></tr>
-        ${finalData.windows.map(w => `<tr><td>${w.label}</td><td>${w.in}</td><td>${w.out}</td></tr>`).join('')}
-      </table>`;
-    }
-
-    summaryDiv.innerHTML = `
-      ${linkVid}
-      <div class="pill">IN total: <strong>${s.in ?? 0}</strong></div>
-      <div class="pill">OUT total: <strong>${s.out ?? 0}</strong></div>
-      <p><strong>Linha (px):</strong> (${finalData.linePx?.x1},${finalData.linePx?.y1}) → (${finalData.linePx?.x2},${finalData.linePx?.y2})</p>
-      ${windowsHtml}
-    `;
-
-    // joga a timeline (primeiras 80 linhas) no JSON
-    jsonPre.textContent = JSON.stringify(finalData.timeline?.slice(0, 80) || [], null, 2)
-      + ((finalData.timeline?.length || 0) > 80 ? `\n... (+${finalData.timeline.length - 80} linhas)` : '');
+    annotatedVideo.src = payload.annotated_video_url;
+    annotatedWrap.classList.remove("hidden");
   }
-});
+  if(Array.isArray(payload.annotated_segment_urls)){
+    payload.annotated_segment_urls.forEach((u,idx)=>{
+      const a = document.createElement("a");
+      a.href = u;
+      a.textContent = `Segmento ${idx+1}`;
+      a.classList.add("secondary");
+      downloads.appendChild(a);
+    });
+  }
+
+  if(Array.isArray(payload.windows) && payload.windows.length){
+    const tbody = windowsTableBody;
+    tbody.innerHTML = "";
+    payload.windows.forEach(w=>{
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${w.label}</td><td>${w.in}</td><td>${w.out}</td>`;
+      tbody.appendChild(tr);
+    });
+    windowsWrap.classList.remove("hidden");
+  }
+}
+
+btnProcess.addEventListener("click", ()=> submitCommon(false));
+btnStream.addEventListener("click", ()=> submitCommon(true));
+
+
+function flashHint(ms=8000){
+  const hint = document.querySelector('.overlay-hint');
+  if(!hint) return;
+  hint.style.opacity = '1';
+  clearTimeout(flashHint._t);
+  flashHint._t = setTimeout(()=>{ hint.style.opacity = '0'; }, ms);
+}
+
+// dentro do onloadedmetadata, depois de drawLinePreview():
+flashHint();
+
+// quando o usuário mexer na linha, esconda a dica:
+overlay.addEventListener('mousedown', ()=> flashHint(0));
+overlay.addEventListener('touchstart', ()=> flashHint(0), {passive:true});
+

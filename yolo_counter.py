@@ -1,29 +1,31 @@
-import cv2
-from ultralytics import YOLO
-from utils import iou_xywh, point_side_of_line, put_text
-from pathlib import Path
+# yolo_counter.py
 import os
+from pathlib import Path
+import cv2
+from functools import lru_cache
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+from ultralytics import YOLO
+
+from utils import (
+    iou_xywh, point_side_of_line, signed_distance_to_line,
+    segments_intersect, put_text, draw_thick_line, Track
+)
 from utils_ffmpeg import split_into_chunks, concat_videos_mp4, probe_duration
 from cpu_tunning import tune_cpu_threads
 
-
-from functools import lru_cache
-from ultralytics import YOLO
-
+# =================== Modelo ===================
 @lru_cache(maxsize=1)
-def get_model_ultra(weights="yolov8n.pt"):
-    # CPU only
+def get_model_ultra(weights="yolov8s.pt"):
+    # Para CPU, o 's' costuma dar ganho de precisão vs 'n' (ainda leve).
     m = YOLO(weights)
-    # nada de FP16 em CPU
     return m
 
-
+# =================== Núcleo por segmento ===================
 def process_segment(video_path, line_norm, sample_fps, save_annotated, out_dir, time_offset=0.0, suffix=""):
-    from cpu_tunning import tune_cpu_threads
     tune_cpu_threads(num_infer_threads=4, num_interop_threads=1, opencv_threads=1)
+    model = get_model_ultra("yolov8s.pt")  # troque para 'n' se ficar pesado
 
-    model = get_model_ultra("yolov8n.pt")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Não foi possível abrir o vídeo: {video_path}")
@@ -32,7 +34,7 @@ def process_segment(video_path, line_norm, sample_fps, save_annotated, out_dir, 
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # linha px
+    # linha em px
     x1n,y1n,x2n,y2n = line_norm
     x1,y1 = int(x1n*width),  int(y1n*height)
     x2,y2 = int(x2n*width),  int(y2n*height)
@@ -45,14 +47,23 @@ def process_segment(video_path, line_norm, sample_fps, save_annotated, out_dir, 
         annotated_path = str(Path(out_dir) / (Path(video_path).stem + f"{suffix}_annotated.mp4"))
         writer = cv2.VideoWriter(annotated_path, fourcc, max(float(sample_fps), 5.0), (width, height))
 
+    # ---- Rastreamento & parâmetros anti-ruído ----
     next_id = 1
-    tracks = {}
-    max_misses = 10
+    tracks = {}  # tid -> Track
+    max_misses = 12
     iou_th = 0.3
+    # Para contagem
+    min_disp_px = max(4, int(0.004 * (width + height)))   # deslocamento mínimo para considerar cruzamento
+    cooldown_frames = int(sample_fps * 0.75)              # evita dupla contagem se ficar “quicando” na linha
+
     total_in = total_out = 0
     timeline = []
     frame_idx = -1
     out_idx = -1
+
+    # vetor normal à linha (para assinar direção via produto escalar)
+    dx, dy = (x2 - x1, y2 - y1)
+    nx, ny = (dy, -dx)  # perpendicular
 
     while True:
         ret, frame = cap.read()
@@ -64,7 +75,9 @@ def process_segment(video_path, line_norm, sample_fps, save_annotated, out_dir, 
         out_idx += 1
         ts = out_idx / float(sample_fps) + float(time_offset)
 
-        results = model(frame, imgsz=448, classes=[0], conf=0.5, iou=0.5, verbose=False)
+        # ---------- Detecção ----------
+        # classes=[0] -> person
+        results = model(frame, imgsz=640, classes=[0], conf=0.35, iou=0.6, verbose=False)
         dets = []
         if len(results):
             b = results[0].boxes
@@ -72,60 +85,83 @@ def process_segment(video_path, line_norm, sample_fps, save_annotated, out_dir, 
                 xywh = b.xywh.cpu().numpy()
                 scores = b.conf.cpu().numpy()
                 for (cx, cy, w, h), sc in zip(xywh, scores):
-                    if sc < 0.4:
+                    if sc < 0.35:
                         continue
                     x = float(cx - w/2); y = float(cy - h/2)
                     dets.append([x, y, float(w), float(h)])
 
-        # associação por IoU
-        for tid in list(tracks.keys()):
-            tracks[tid]["updated"] = False
+        # ---------- Associação por IoU ----------
+        # marca todos como não atualizados
+        for trk in tracks.values():
+            trk.misses += 1  # envelhece por padrão (se atualizar, voltamos a 0)
+
+        used = set()
         for db in dets:
-            best_id, best_iou = None, 0.0
+            # encontra melhor track
+            best_tid, best_iou = None, 0.0
             for tid, trk in tracks.items():
-                score = iou_xywh(db, trk["bbox"])
+                if tid in used:  # um det por track
+                    continue
+                score = iou_xywh(db, trk.bbox)
                 if score > best_iou:
-                    best_iou, best_id = score, tid
-            if best_id is not None and best_iou >= iou_th:
-                trk = tracks[best_id]
-                trk["bbox"] = db
-                trk["centroid"] = (db[0]+db[2]/2.0, db[1]+db[3]/2.0)
-                trk["misses"] = 0
-                trk["updated"] = True
+                    best_iou, best_tid = score, tid
+            if best_tid is not None and best_iou >= iou_th:
+                trk = tracks[best_tid]
+                trk.update(db)
+                trk.misses = 0
+                used.add(best_tid)
             else:
-                tracks[next_id] = {
-                    "bbox": db,
-                    "centroid": (db[0]+db[2]/2.0, db[1]+db[3]/2.0),
-                    "misses": 0,
-                    "updated": True,
-                    "last_side": None
-                }
+                # cria novo track
+                cx = db[0] + db[2]/2.0
+                cy = db[1] + db[3]/2.0
+                side = 1 if point_side_of_line(cx, cy, x1, y1, x2, y2) > 0 else -1
+                tracks[next_id] = Track(next_id, db, side)
+                used.add(next_id)
                 next_id += 1
 
-        # aging/remover
-        for tid in list(tracks.keys()):
-            if not tracks[tid]["updated"]:
-                tracks[tid]["misses"] += 1
-            if tracks[tid]["misses"] > max_misses:
-                del tracks[tid]
+        # remove tracks perdidos
+        to_del = [tid for tid,trk in tracks.items() if trk.misses > max_misses]
+        for tid in to_del:
+            del tracks[tid]
 
+        # ---------- Contagem por cruzamento de segmento ----------
         crossed_in = 0
         crossed_out = 0
-        for tid, trk in tracks.items():
-            cx, cy = trk["centroid"]
-            side = point_side_of_line(cx, cy, x1, y1, x2, y2)
-            last = trk.get("last_side", None)
-            if last is None:
-                trk["last_side"] = side
+
+        for tid, trk in list(tracks.items()):
+            if len(trk.history) < 2:
+                continue
+
+            p_prev = trk.history[-2]
+            p_now  = trk.history[-1]
+
+            # deslocamento mínimo para evitar ruído
+            if abs(p_now[0] - p_prev[0]) + abs(p_now[1] - p_prev[1]) < min_disp_px:
+                continue
+
+            # checa se o segmento do track cruza a linha
+            if not segments_intersect((x1,y1),(x2,y2), p_prev, p_now):
+                # também aceita troca de sinal da distância assinada (mais robusto)
+                d1 = signed_distance_to_line(p_prev[0], p_prev[1], x1, y1, x2, y2)
+                d2 = signed_distance_to_line(p_now[0],  p_now[1],  x1, y1, x2, y2)
+                if d1 == 0 or d2 == 0 or (d1 > 0) == (d2 > 0):
+                    continue
+
+            # cooldown para não contar 2x
+            if trk.alive_frames - trk.last_cross_frame < cooldown_frames:
+                continue
+
+            # decide direção usando o vetor movimento projetado na normal
+            mvx, mvy = (p_now[0]-p_prev[0], p_now[1]-p_prev[1])
+            dir_sign = 1 if (mvx * nx + mvy * ny) > 0 else -1
+            # Convenção:
+            # dir_sign > 0 => IN ; dir_sign < 0 => OUT
+            if dir_sign > 0:
+                total_in += 1; crossed_in += 1
             else:
-                if side != 0 and last != 0 and side != last:
-                    if last < side:
-                        total_in += 1; crossed_in += 1
-                    else:
-                        total_out += 1; crossed_out += 1
-                    trk["last_side"] = side
-                else:
-                    trk["last_side"] = side
+                total_out += 1; crossed_out += 1
+
+            trk.last_cross_frame = trk.alive_frames
 
         timeline.append({
             "frame": frame_idx,
@@ -137,16 +173,18 @@ def process_segment(video_path, line_norm, sample_fps, save_annotated, out_dir, 
             "cumulativeOut": total_out
         })
 
+        # ---------- Desenho ----------
         if writer is not None:
-            cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+            draw_thick_line(frame, (x1, y1), (x2, y2), thickness=8, color=(0,255,255))
             for tid, trk in tracks.items():
-                x, y, w, h = trk["bbox"]
+                x, y, w, h = trk.bbox
                 p1 = (int(x), int(y)); p2 = (int(x+w), int(y+h))
-                cx, cy = int(trk["centroid"][0]), int(trk["centroid"][1])
+                cx, cy = int(trk.centroid()[0]), int(trk.centroid()[1])
                 cv2.rectangle(frame, p1, p2, (0,255,0), 2)
                 cv2.circle(frame, (cx, cy), 3, (255,255,255), -1)
                 put_text(frame, f"ID {tid}", (p1[0], max(0, p1[1]-6)))
-            put_text(frame, f"IN: {total_in}  OUT: {total_out}", (10, 30))
+            put_text(frame, f"IN: {total_in}  OUT: {total_out}", (10, 34), scale=0.8)
+
             writer.write(frame)
 
     cap.release()
@@ -164,6 +202,7 @@ def process_segment(video_path, line_norm, sample_fps, save_annotated, out_dir, 
         "annotated_video": annotated_path
     }
 
+# =================== Classe pública ===================
 class PeopleLineCounter:
     def __init__(
         self,
@@ -178,39 +217,27 @@ class PeopleLineCounter:
         self.sample_fps = float(sample_fps)
         self.save_annotated = bool(save_annotated)
         self.out_dir = Path(out_dir)
-        self.out_dir.mkdir(exist_ok=True)
+        self.out_dir.mkdir(exist_ok=True, parents=True)
         self.chunk_seconds = int(chunk_seconds)
         self.workers = int(workers)
 
     def process(self, video_path: str):
-        """Se chunk_seconds > 0: paralelo; senão, sequencial."""
         if self.chunk_seconds and self.chunk_seconds > 0:
             return self._process_parallel(video_path)
         return process_segment(
             video_path, self.line_norm, self.sample_fps, self.save_annotated, self.out_dir, 0.0, ""
         )
 
-    # ========= NOVO: streaming de parciais por chunk =========
+    # ---------- Streaming por chunk (mantido) ----------
     def iter_parallel(self, video_path: str):
-        """
-        Generator que:
-          - divide em chunks,
-          - processa em paralelo,
-          - YIELD por chunk:
-              {"event":"chunk_result","index":i,"startSec":s0,"endSec":s1,"in":X,"out":Y,"annotated":path?}
-          - ao final, YIELD:
-              {"event":"final", ... agregado ...}
-        """
         base = Path(video_path).stem
         seg_dir = self.out_dir / f"{base}_segments"
         seg_dir.mkdir(exist_ok=True)
 
-        # 1) split
         segments = split_into_chunks(video_path, str(seg_dir), chunk_seconds=self.chunk_seconds)
         if not segments:
             raise RuntimeError("Segmentação falhou (sem segmentos).")
 
-        # offsets/durações reais
         offsets, durs, acc = [], [], 0.0
         for p in segments:
             d = probe_duration(p)
@@ -218,7 +245,6 @@ class PeopleLineCounter:
             offsets.append(acc)
             acc += d
 
-        # 2) paralelo
         max_workers = self.workers if self.workers > 0 else (os.cpu_count() or 2)
         results = [None] * len(segments)
         annotated_segments = []
@@ -240,7 +266,6 @@ class PeopleLineCounter:
                 if self.save_annotated and r.get("annotated_video"):
                     annotated_segments.append(r["annotated_video"])
 
-                # parcial do chunk
                 start_sec = offsets[idx]
                 end_sec   = offsets[idx] + (durs[idx] or 0.0)
                 yield {
@@ -253,7 +278,6 @@ class PeopleLineCounter:
                     "annotated": r.get("annotated_video"),
                 }
 
-        # 3) agregado final
         total_in  = sum(r["totals"]["in"]  for r in results)
         total_out = sum(r["totals"]["out"] for r in results)
         timeline = []
@@ -279,53 +303,7 @@ class PeopleLineCounter:
             "annotated_segments": annotated_segments if self.save_annotated else [],
         }
 
-    # ========= NOVO: agregação por faixas (14:20–14:25 etc.) =========
-    @staticmethod
-    def aggregate_windows(timeline, window_minutes=5, clock_start=""):
-        """
-        timeline: lista com 'timeSec','crossedIn','crossedOut'
-        window_minutes: tamanho do bucket em minutos
-        clock_start: "HH:MM" (opcional) p/ rótulo por relógio; se vazio, usa mm:ss.
-        """
-        bucket = max(1, int(window_minutes)) * 60
-        if not timeline:
-            return []
-
-        # (t, in, out) em segundos inteiros
-        events = [(int(round(x["timeSec"])), int(x["crossedIn"]), int(x["crossedOut"])) for x in timeline]
-        max_t = max(t for t, _, _ in events)
-
-        base_h = base_m = 0
-        if clock_start:
-            try:
-                base_h, base_m = [int(x) for x in clock_start.split(":")]
-            except:
-                base_h = base_m = 0
-
-        def to_clock(sec):
-            total_min = sec // 60
-            h = (base_h + (base_m + total_min) // 60) % 24
-            m = (base_m + total_min) % 60
-            return f"{h:02d}:{m:02d}"
-
-        def mmss(sec):
-            m = sec // 60; s = sec % 60
-            return f"{m:02d}:{s:02d}"
-
-        windows = []
-        for start in range(0, max_t + 1, bucket):
-            end = start + bucket
-            win_in = win_out = 0
-            for t, ci, co in events:
-                if start <= t < end:
-                    win_in += ci
-                    win_out += co
-            label = f"{to_clock(start)}-{to_clock(end)}" if clock_start else f"{mmss(start)}-{mmss(end)}"
-            windows.append({"label": label, "in": win_in, "out": win_out})
-
-        return windows
-
-    # (continua igual) processamento completo sem stream (retorno único)
+    # ---------- Execução paralela sem streaming (mantido) ----------
     def _process_parallel(self, video_path: str):
         base = Path(video_path).stem
         seg_dir = self.out_dir / f"{base}_segments"
@@ -382,3 +360,40 @@ class PeopleLineCounter:
             "annotated_video": annotated_concat,
             "annotated_segments": annotated_segments if self.save_annotated else [],
         }
+
+# =================== Execução por pasta (opcional) ===================
+if __name__ == "__main__":
+    import argparse, glob, json
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--videos", nargs="*", default=[],
+                        help="Arquivos .mp4; se vazio, busca video*.mp4 no diretório atual.")
+    parser.add_argument("--line", nargs=4, type=float, default=[0.10,0.55,0.90,0.55],
+                        help="Linha normalizada x1 y1 x2 y2 (0..1)")
+    parser.add_argument("--fps", type=float, default=5.0)
+    parser.add_argument("--chunk", type=int, default=45)
+    parser.add_argument("--save-annot", action="store_true")
+    parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--out", default="outputs")
+    args = parser.parse_args()
+
+    vids = args.videos or sorted(glob.glob("video*.mp4"))
+    plc = PeopleLineCounter(
+        line_norm=tuple(args.line),
+        sample_fps=args.fps,
+        save_annotated=args.save_annot,
+        out_dir=Path(args.out),
+        chunk_seconds=args.chunk,
+        workers=args.workers
+    )
+    summary = {}
+    for v in vids:
+        print(f"[INFO] Processando: {v}")
+        res = plc.process(v)
+        summary[Path(v).name] = res["totals"]
+        print(f"  -> IN {res['totals']['in']} | OUT {res['totals']['out']}")
+        if res.get("annotated_video"):
+            print(f"  -> anotado: {res['annotated_video']}")
+    Path(args.out).mkdir(exist_ok=True, parents=True)
+    with open(Path(args.out)/"summary.json","w",encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    print("[OK] summary salvo em outputs/summary.json")
