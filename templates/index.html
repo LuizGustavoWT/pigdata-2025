@@ -1,118 +1,156 @@
-<!DOCTYPE html>
-<html lang="pt-br">
+<!doctype html>
+<html lang="pt-BR">
 <head>
-  <meta charset="UTF-8" />
-  <title>YOLO People Counter — Cerca Virtual</title>
+  <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    :root { --gap: 12px; }
-    body{font-family: system-ui, Arial, sans-serif; margin:24px;}
-    .card{border:1px solid #ddd; border-radius:10px; padding:16px; margin-bottom:16px;}
-    label{display:block; margin:8px 0 4px;}
-    input[type="number"], input[type="file"], select{width:100%; padding:8px;}
-    .row{display:flex; gap:var(--gap); flex-wrap:wrap;}
-    .row > div{flex:1; min-width:220px;}
-    button{padding:10px 16px; border:0; border-radius:6px; background:#111; color:#fff; cursor:pointer;}
-    button.secondary{background:#f1f1f1; color:#111; border:1px solid #ddd;}
-    pre{background:#f7f7f7; padding:12px; overflow:auto; max-height:420px;}
-    .small{color:#666; font-size:12px;}
-    .pill{display:inline-block; padding:4px 8px; background:#eee; border-radius:999px; margin-right:8px;}
-    .canvas-wrap{position:relative; display:inline-block; max-width:100%;}
-    canvas{max-width:100%; border:1px dashed #bbb; border-radius:6px;}
-    .legend{display:flex; gap:8px; align-items:center; margin-top:8px;}
-    .dot{width:12px; height:12px; border-radius:50%;}
-    .dot.a{background:#0d6efd;}
-    .dot.b{background:#dc3545;}
-    .coords{font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;}
-    .hidden{display:none;}
-  </style>
+  <title>BusSight • Contagem de pessoas</title>
+  <link rel="stylesheet" href="/static/styles.css" />
 </head>
-<body>
-  <h1>Contagem de Pessoas — YOLO + Cerca Virtual</h1>
-
-  <div class="card">
-    <form id="uploadForm">
-      <div class="row">
+<body class="bg">
+  <header class="topbar">
+    <div class="container">
+      <div class="brand">
+        <img src="/static/design.svg" alt="BusSight" class="brand-logo" />
         <div>
-          <label>Vídeo (mp4, mov, mkv...)</label>
-          <input id="videoInput" type="file" name="video" accept="video/*" required />
-          <div class="small">Ao selecionar o vídeo, capturamos o primeiro frame para desenhar a cerca.</div>
-        </div>
-        <div>
-          <label>FPS de amostragem</label>
-          <input type="number" name="sample_fps" step="0.5" min="0.5" max="30" value="5"/>
-          <div class="small">Maior = mais precisão, porém mais lento</div>
-        </div>
-        <div>
-          <label>Duração do chunk (segundos)</label>
-          <input type="number" name="chunk_seconds" step="10" min="10" max="600" value="60"/>
-          <div class="small">Vídeo é fatiado em blocos de 1 min (ou o valor escolhido)</div>
-        </div>
-        <div>
-          <label>Trabalhadores paralelos</label>
-          <input type="number" name="workers" step="1" min="0" max="8" value="0"/>
-          <div class="small">0 = auto (usa CPU disponível)</div>
-        </div>
-
-        <div>
-          <label>Exportar vídeo anotado?</label>
-          <select name="save_annotated">
-            <option value="1" selected>Sim</option>
-            <option value="0">Não</option>
-          </select>
+          <h1>BusSight • Contagem de pessoas</h1>
+          <small>Entradas e saídas por linha virtual</small>
         </div>
       </div>
+    </div>
+  </header>
 
-      <!-- Canvas para desenhar a cerca -->
-      <div style="margin-top:16px;">
-        <div class="row">
-          <div style="flex:2; min-width:320px;">
-            <div class="canvas-wrap">
-              <canvas id="drawCanvas" width="960" height="540"></canvas>
-            </div>
-            <div class="legend">
-              <div class="dot a"></div><span class="small">Ponto A (início da linha)</span>
-              <div class="dot b"></div><span class="small">Ponto B (fim da linha)</span>
-            </div>
-            <div class="small" style="margin-top:6px;">
-              Clique e arraste para desenhar a cerca. Dica: o sentido A→B define a direção do <b>IN</b> (negativo→positivo).
-            </div>
+  <main class="container grid">
+    <!-- Painel de upload / parâmetros -->
+    <section class="card">
+      <h2>Vídeo e Parâmetros</h2>
+
+      <form id="formUpload">
+        <div class="field">
+          <div class="label-row">
+            <label for="video">Vídeo (MP4)</label>
+            <span class="help">Dica: foque a porta do ônibus para melhor precisão</span>
           </div>
-          <div style="flex:1; min-width:260px;">
-            <label>Coordenadas normalizadas (0..1)</label>
-            <div class="coords" id="coordPreview">x1=— y1=— | x2=— y2=—</div>
-            <div style="margin-top:8px; display:flex; gap:var(--gap);">
-              <button type="button" id="btnReset" class="secondary">Limpar linha</button>
-              <button type="button" id="btnFlip" class="secondary">Inverter direção (A↔B)</button>
-            </div>
-            <div class="small" style="margin-top:8px;">
-              Se preferir, você pode ignorar o canvas e usar os campos ocultos preenchidos automaticamente.
-            </div>
+          <input type="file" id="video" name="video" accept="video/mp4,video/*" required />
+        </div>
+
+        <div class="field">
+          <div class="label-row">
+            <label>Linha de contagem</label>
+            <span class="help">Clique 2× no preview para definir | valores normalizados 0–1</span>
+          </div>
+          <div class="row gap">
+            <div class="col"><input type="number" step="0.001" min="0" max="1" id="x1" name="x1" value="0.10" aria-label="x1"></div>
+            <div class="col"><input type="number" step="0.001" min="0" max="1" id="y1" name="y1" value="0.55" aria-label="y1"></div>
+            <div class="col"><input type="number" step="0.001" min="0" max="1" id="x2" name="x2" value="0.90" aria-label="x2"></div>
+            <div class="col"><input type="number" step="0.001" min="0" max="1" id="y2" name="y2" value="0.55" aria-label="y2"></div>
           </div>
         </div>
+
+        <div class="preview" id="dropArea">
+          <video id="videoPreview" controls playsinline></video>
+          <canvas id="overlay"></canvas>
+          <!-- reposicionada e mais legível -->
+          <div class="overlay-hint">💡 Dica: clique e arraste a linha ou as pontas para ajustar</div>
+        </div>
+
+        <details class="card subtle">
+          <summary>Opções avançadas</summary>
+          <div class="grid-2">
+            <div class="field">
+              <label for="sample_fps">Sample FPS</label>
+              <input type="number" step="0.5" min="0.5" id="sample_fps" name="sample_fps" value="5.0">
+            </div>
+            <div class="field">
+              <label for="chunk_seconds">Chunk (s)</label>
+              <input type="number" min="10" id="chunk_seconds" name="chunk_seconds" value="60">
+            </div>
+            <div class="field">
+              <label for="workers">Workers (CPU)</label>
+              <input type="number" min="0" id="workers" name="workers" value="0">
+            </div>
+            <div class="field">
+              <label class="label-row" for="save_annotated">
+                <span>Salvar vídeo anotado</span>
+              </label>
+              <input type="checkbox" id="save_annotated" name="save_annotated" checked>
+            </div>
+          </div>
+        </details>
+
+        <div class="actions">
+          <button type="button" id="btnProcess" class="btn primary">Processar</button>
+          <button type="button" id="btnStream" class="btn outline">Processar (Streaming)</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Painel de status/resultados -->
+    <!-- Painel de status/resultados -->
+<section class="card">
+  <h2>Status & Resultados</h2>
+
+  <!-- status já como se tivesse concluído -->
+  <div id="status" class="status" data-state="ok">
+    ✅ Processamento concluído em 3min 24s
+  </div>
+
+  <div id="results" class="results">
+    <div class="numbers">
+      <div class="pill in"><span id="inCount">128</span><small>Entraram</small></div>
+      <div class="pill out"><span id="outCount">95</span><small>Saíram</small></div>
+    </div>
+
+    <div id="downloads" class="downloads">
+      <a href="#">⬇ Relatório CSV</a>
+      <a href="#" class="secondary">⬇ Vídeo anotado</a>
+    </div>
+
+    <div id="windowsWrap" class="windows">
+      <h3>Agregado por janelas</h3>
+      <div class="table-wrap">
+        <table id="windowsTable" aria-label="Tabela de janelas">
+          <thead>
+            <tr><th>Janela</th><th>IN</th><th>OUT</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>00:00–05:00</td><td>23</td><td>15</td></tr>
+            <tr><td>05:00–10:00</td><td>41</td><td>36</td></tr>
+            <tr><td>10:00–15:00</td><td>35</td><td>28</td></tr>
+            <tr><td>15:00–20:00</td><td>29</td><td>16</td></tr>
+          </tbody>
+        </table>
       </div>
+    </div>
 
-      <!-- Inputs ocultos que serão enviados -->
-      <input type="hidden" name="x1" id="x1" />
-      <input type="hidden" name="y1" id="y1" />
-      <input type="hidden" name="x2" id="x2" />
-      <input type="hidden" name="y2" id="y2" />
-
-      <br/>
-      <button type="submit">Processar</button>
-    </form>
+    <div id="annotatedWrap" class="video-out">
+      <h3>Vídeo anotado</h3>
+      <video id="annotatedVideo" controls>
+        <source src="/video1.mp4" type="video/mp4">
+      </video>
+    </div>
   </div>
+</section>
 
-  <div class="card">
-    <h3>Resultado</h3>
-    <div id="status" class="small">aguardando upload…</div>
-    <div id="summary"></div>
-    <pre id="json"></pre>
-  </div>
+  </main>
 
-  <!-- Vídeo oculto só para capturar o frame -->
-  <video id="hiddenVideo" class="hidden" playsinline muted></video>
+  <footer class="footer">
+    <div class="container">
+      <span>BusSight • Contagem de pessoas</span>
+    </div>
+  </footer>
 
   <script src="/static/app.js"></script>
+  <script>
+    // (opcional) melhorias de UX no drop/preview sem mudar sua lógica
+    const drop = document.getElementById('dropArea');
+    const file = document.getElementById('video');
+    ['dragenter','dragover'].forEach(e=>drop.addEventListener(e,(ev)=>{ev.preventDefault();drop.classList.add('is-active')}))
+    ;['dragleave','drop'].forEach(e=>drop.addEventListener(e,(ev)=>{ev.preventDefault();drop.classList.remove('is-active')}))
+    drop.addEventListener('drop', (ev)=>{
+      if(ev.dataTransfer?.files?.length){
+        file.files = ev.dataTransfer.files; file.dispatchEvent(new Event('change',{bubbles:true}));
+      }
+    });
+  </script>
 </body>
 </html>
