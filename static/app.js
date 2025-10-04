@@ -240,3 +240,47 @@ flashHint();
 overlay.addEventListener('mousedown', ()=> flashHint(0));
 overlay.addEventListener('touchstart', ()=> flashHint(0), {passive:true});
 
+function calcularMicro() {
+  const kmRodadosMicro = parseFloat(document.getElementById('kmRodadosMicro').value);
+  const litrosPorKmMicro = parseFloat(document.getElementById('litrosPorKmMicro').value);
+  const precoLitro = parseFloat(document.getElementById('precoLitro').value);
+  const custoPorKmManutencaoMicro = parseFloat(document.getElementById('custoPorKmManutencaoMicro').value);
+
+  if (isNaN(kmRodadosMicro) || isNaN(litrosPorKmMicro) || isNaN(precoLitro) || isNaN(custoPorKmManutencaoMicro)) {
+    alert('Por favor, preencha todos os campos corretamente.');
+    return;
+  }
+
+  const consumoTotalMicro = kmRodadosMicro * litrosPorKmMicro;
+  const custoTotalCombustivelMicro = consumoTotalMicro * precoLitro;
+  const custoPorKmMicro = custoTotalCombustivelMicro / kmRodadosMicro;
+  const custoTotalMicro = custoTotalCombustivelMicro + (custoPorKmManutencaoMicro * kmRodadosMicro);
+
+  document.getElementById('consumoTotalMicro').textContent = consumoTotalMicro.toFixed(2) + ' L';
+  document.getElementById('custoTotalCombustivelMicro').textContent = 'R$ ' + custoTotalCombustivelMicro.toFixed(2);
+  document.getElementById('custoPorKmMicro').textContent = 'R$ ' + custoPorKmMicro.toFixed(2);
+  document.getElementById('custoTotalMicro').textContent = 'R$ ' + custoTotalMicro.toFixed(2);
+}
+
+
+function calcularMid() {
+  const kmRodadosMid = parseFloat(document.getElementById('kmRodadosMid').value);
+  const litrosPorKmMid = parseFloat(document.getElementById('litrosPorKmMid').value);
+  const precoLitro = parseFloat(document.getElementById('precoLitro').value);
+  const custoPorKmManutencaoMid = parseFloat(document.getElementById('custoPorKmManutencaoMid').value);
+
+  if (isNaN(kmRodadosMid) || isNaN(litrosPorKmMid) || isNaN(precoLitro) || isNaN(custoPorKmManutencaoMid)) {
+    alert('Por favor, preencha todos os campos corretamente.');
+    return;
+  }
+
+  const consumoTotalMid = kmRodadosMid * litrosPorKmMid;
+  const custoTotalCombustivelMid = consumoTotalMid * precoLitro;
+  const custoPorKmMid = custoTotalCombustivelMid / kmRodadosMid;
+  const custoTotalMid = custoTotalCombustivelMid + (custoPorKmManutencaoMid * kmRodadosMid);
+
+  document.getElementById('consumoTotalMid').textContent = consumoTotalMid.toFixed(2) + ' L';
+  document.getElementById('custoTotalCombustivelMid').textContent = 'R$ ' + custoTotalCombustivelMid.toFixed(2);
+  document.getElementById('custoPorKmMid').textContent = 'R$ ' + custoPorKmMid.toFixed(2);
+  document.getElementById('custoTotalMid').textContent = 'R$ ' + custoTotalMid.toFixed(2);
+}
