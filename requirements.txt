@@ -1,11 +1,15 @@
-# Web
-fastapi==0.114.0
-uvicorn[standard]==0.30.6
-python-multipart==0.0.9
-jinja2==3.1.4
+# --- BusSight (Flask + SSE) ---
+Flask==3.0.3
+Jinja2==3.1.4
+Werkzeug==3.0.4
 
-# IA / CV
-# -> Ultralytics 8.2.x requer numpy < 2.0
-numpy==2.1.1
-opencv-python==4.10.0.84
-ultralytics>=8.3.0
+# CV / IA  (compatíveis entre si)
+numpy==1.26.4                 # estável e suportado pelo Ultralytics 8.2.x
+opencv-python-headless==4.10.0.84
+ultralytics==8.2.103          # funciona bem com numpy<2.0
+
+ffmpeg-python==0.2.0
+python-dotenv==1.0.1
+
+# Prod opcional (WSGI)
+waitress==3.0.0

@@ -1,399 +1,364 @@
 # yolo_counter.py
-import os
-from pathlib import Path
-import cv2
-from functools import lru_cache
-from concurrent.futures import ProcessPoolExecutor, as_completed
+# Contagem por cruzamento de linha (normalizada) com YOLO (se disponível) + fallback.
+# Contrato esperado pelo app.py:
+# - process_stream(video_path, line|line_norm, sample_fps, chunk_seconds, workers) -> yield dicts {type:'progress'|'done'|'error', ...}
+# - process_video(video_path, line|line_norm, sample_fps, chunk_seconds, workers, save_annotated) -> dict com totais, windows, paths
 
-from ultralytics import YOLO
+from __future__ import annotations
+import os, csv, time, math, pathlib, datetime as dt
+from typing import Dict, Tuple, Generator, List, Optional
 
-from utils import (
-    iou_xywh, point_side_of_line, signed_distance_to_line,
-    segments_intersect, put_text, draw_thick_line, Track
-)
-from utils_ffmpeg import split_into_chunks, concat_videos_mp4, probe_duration
-from cpu_tunning import tune_cpu_threads
+try:
+    import cv2
+    import numpy as np
+except Exception as e:
+    raise RuntimeError("OpenCV (cv2) é obrigatório. Instale com: pip install opencv-python") from e
 
-# =================== Modelo ===================
-@lru_cache(maxsize=1)
-def get_model_ultra(weights="yolov8s.pt"):
-    # Para CPU, o 's' costuma dar ganho de precisão vs 'n' (ainda leve).
-    m = YOLO(weights)
-    return m
+# YOLO opcional
+YOLO_AVAILABLE = False
+YOLO = None
+try:
+    from ultralytics import YOLO as _YOLO
+    YOLO_AVAILABLE = True
+    YOLO = _YOLO
+except Exception:
+    YOLO_AVAILABLE = False
+    YOLO = None
 
-# =================== Núcleo por segmento ===================
-def process_segment(video_path, line_norm, sample_fps, save_annotated, out_dir, time_offset=0.0, suffix=""):
-    tune_cpu_threads(num_infer_threads=4, num_interop_threads=1, opencv_threads=1)
-    model = get_model_ultra("yolov8s.pt")  # troque para 'n' se ficar pesado
+# ---------- helpers de coerção ----------
+def _coerce_line(val) -> Optional[Tuple[float,float,float,float]]:
+    """
+    Aceita tuple/list/str e retorna (x1,y1,x2,y2) float em [0..1] ou None.
+    """
+    if val is None:
+        return None
+    if isinstance(val, (list, tuple)) and len(val) == 4:
+        try:
+            t = tuple(float(x) for x in val)
+            if all(0.0 <= v <= 1.0 for v in t):
+                return t
+            # se vier em pixels por engano, normaliza depois — aqui só devolve mesmo
+            return t
+        except Exception:
+            return None
+    if isinstance(val, str):
+        try:
+            parts = [p.strip() for p in val.split(",")]
+            if len(parts) == 4:
+                t = tuple(float(x) for x in parts)
+                return t
+        except Exception:
+            return None
+    return None
+
+def _coerce_float(x, default=0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return float(default)
+
+def _coerce_int(x, default=0) -> int:
+    try:
+        return int(float(x))
+    except Exception:
+        return int(default)
+
+# ---------- Utilidades geométricas ----------
+def line_side(x, y, x1, y1, x2, y2) -> float:
+    """Sinal do produto vetorial: >0 um lado, <0 outro lado, ~0 em cima."""
+    return (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
+
+def normalize_line_to_pixels(line_norm, w, h) -> Tuple[int,int,int,int]:
+    x1, y1, x2, y2 = line_norm
+    # se vierem valores >1, assume que já estão em pixels
+    if max(abs(x1),abs(y1),abs(x2),abs(y2)) > 1.0001:
+        return int(x1), int(y1), int(x2), int(y2)
+    return int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)
+
+def ensure_dirs(path: str):
+    pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+# ---------- Núcleo de contagem ----------
+class LineCounter:
+    """
+    Conta cruzamentos por track_id: quando o sinal do lado muda, incrementa IN/OUT.
+    Direção: prev<0->side>0 => IN ; prev>0->side<0 => OUT (heurística estável).
+    """
+    def __init__(self, w:int, h:int, line_norm:Tuple[float,float,float,float]):
+        self.w, self.h = w, h
+        self.x1, self.y1, self.x2, self.y2 = normalize_line_to_pixels(line_norm, w, h)
+        self.last_side: Dict[int, float] = {}  # track_id -> side
+        self.in_count = 0
+        self.out_count = 0
+
+    def update_point(self, track_id:int, cx:float, cy:float):
+        side = line_side(cx, cy, self.x1, self.y1, self.x2, self.y2)
+        prev = self.last_side.get(track_id)
+        if prev is not None:
+            if prev == 0: prev = -1e-6
+            if side == 0: side = 1e-6
+            if prev * side < 0:
+                if prev < 0 < side:
+                    self.in_count += 1
+                elif prev > 0 > side:
+                    self.out_count += 1
+        self.last_side[track_id] = side
+
+# ---------- Pipeline principal ----------
+def _iterate_frames(cap, every_n_frames:int):
+    idx = 0
+    ok, frame = cap.read()
+    while ok:
+        if idx % every_n_frames == 0:
+            yield idx, frame
+        ok, frame = cap.read()
+        idx += 1
+
+def _estimate_every_n_frames(fps: float, sample_fps: float) -> int:
+    if fps <= 0: fps = 25.0
+    if sample_fps <= 0: sample_fps = 5.0
+    step = max(1, int(round(fps / sample_fps)))
+    return step
+
+def _draw_overlays(frame, counter: LineCounter, in_partial:int, out_partial:int):
+    # linha
+    cv2.line(frame, (counter.x1, counter.y1), (counter.x2, counter.y2), (184,95,31), 2)  # BGR
+    # contadores
+    txt = f"IN: {in_partial}  OUT: {out_partial}  NET: {in_partial - out_partial}"
+    cv2.rectangle(frame, (10,10), (10+320, 45), (0,0,0), -1)
+    cv2.putText(frame, txt, (18,38), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2, cv2.LINE_AA)
+    return frame
+
+def _run_yolo_on_frame(model, frame):
+    # Pessoas (classe 0)
+    res = model.predict(source=frame, classes=[0], conf=0.25, verbose=False)
+    if not res: return []
+    r = res[0]
+    dets = []
+    if getattr(r, "boxes", None) is None: return dets
+    boxes = r.boxes.xyxy.cpu().numpy()
+    for i, (x1,y1,x2,y2) in enumerate(boxes):
+        cx = float((x1+x2)/2.0)
+        cy = float((y1+y2)/2.0)
+        dets.append({"id": i, "cx": cx, "cy": cy})
+    return dets
+
+def _run_yolo_track_frames(model, frames_iter, counter: LineCounter, writer=None):
+    for idx, frame in frames_iter:
+        dets = _run_yolo_on_frame(model, frame)
+        for d in dets:
+            counter.update_point(d["id"], d["cx"], d["cy"])
+        if writer is not None:
+            _draw_overlays(frame, counter, counter.in_count, counter.out_count)
+            writer.write(frame)
+        yield idx
+
+def _fallback_dummy(frames_iter, counter: LineCounter, writer=None):
+    for idx, frame in frames_iter:
+        if writer is not None:
+            _draw_overlays(frame, counter, counter.in_count, counter.out_count)
+            writer.write(frame)
+        yield idx
+
+# ---------- API esperada pelo app ----------
+def process_stream(
+    video_path: str,
+    line: Tuple[float,float,float,float] | None = None,
+    sample_fps: float = 5.0,
+    chunk_seconds: int = 60,
+    workers: int = 0,
+    line_norm: Tuple[float,float,float,float] | None = None,
+    **kwargs
+) -> Generator[dict, None, None]:
+    """
+    Eventos:
+      {"type":"progress","pct":int,"in_partial":int,"out_partial":int}
+      {"type":"done","in_total":int,"out_total":int,"net_total":int,"windows":[...]}
+      {"type":"error","message":"..."}
+    """
+    try:
+        if not os.path.exists(video_path):
+            yield {"type":"error","message":"Vídeo não encontrado."}
+            return
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            yield {"type":"error","message":"Falha ao abrir vídeo."}
+            return
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+
+        # coersões de tipos (querystring chega como str)
+        sample_fps = _coerce_float(sample_fps, 5.0)
+        chunk_seconds = _coerce_int(chunk_seconds, 60)
+        workers = _coerce_int(workers, 0)
+
+        # aceita line OU line_norm; ambos podem vir como string "x1,y1,x2,y2"
+        line = _coerce_line(line if line is not None else line_norm)
+        if line is None:
+            yield {"type":"error","message":"Linha inválida (esperado x1,y1,x2,y2 normalizados)."}
+            return
+
+        step = _estimate_every_n_frames(fps, sample_fps)
+        counter = LineCounter(w, h, line)
+        frames_iter = _iterate_frames(cap, step)
+
+        if YOLO_AVAILABLE:
+            model = YOLO("yolov8n.pt")  # leve para CPU
+            runner = _run_yolo_track_frames(model, frames_iter, counter, writer=None)
+        else:
+            runner = _fallback_dummy(frames_iter, counter, writer=None)
+
+        last_emit = 0.0
+        for idx in runner:
+            pct = int(min(100, math.floor((idx+1)/max(1,total_frames)*100)))
+            now = time.time()
+            if now - last_emit > 0.08:  # ~10 Hz
+                yield {
+                    "type":"progress",
+                    "pct": pct,
+                    "in_partial": int(counter.in_count),
+                    "out_partial": int(counter.out_count)
+                }
+                last_emit = now
+
+        net_total = int(counter.in_count - counter.out_count)
+        dur_s = int(total_frames / (fps or 1))
+        windows = [{
+            "start": "00:00:00",
+            "end": _fmt_s(dur_s),
+            "in": int(counter.in_count),
+            "out": int(counter.out_count),
+        }]
+        yield {
+            "type":"done",
+            "in_total": int(counter.in_count),
+            "out_total": int(counter.out_count),
+            "net_total": net_total,
+            "windows": windows
+        }
+
+    except Exception as e:
+        yield {"type":"error","message": f"{type(e).__name__}: {e}"}
+
+def process_video(
+    video_path: str,
+    line: Tuple[float,float,float,float] | None = None,
+    sample_fps: float = 5.0,
+    chunk_seconds: int = 60,
+    workers: int = 0,
+    save_annotated: bool = False,
+    line_norm: Tuple[float,float,float,float] | None = None,
+    **kwargs
+) -> dict:
+    """
+    Retorna:
+      { ok, in_total, out_total, net_total, windows, csv_path, annotated_path }
+    """
+    if not os.path.exists(video_path):
+        return {"ok": False, "error": "Vídeo não encontrado."}
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise RuntimeError(f"Não foi possível abrir o vídeo: {video_path}")
+        return {"ok": False, "error": "Falha ao abrir vídeo."}
 
-    src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
 
-    # linha em px
-    x1n,y1n,x2n,y2n = line_norm
-    x1,y1 = int(x1n*width),  int(y1n*height)
-    x2,y2 = int(x2n*width),  int(y2n*height)
+    # coersões
+    sample_fps = _coerce_float(sample_fps, 5.0)
+    chunk_seconds = _coerce_int(chunk_seconds, 60)
+    workers = _coerce_int(workers, 0)
+    save_annotated = bool(save_annotated)
 
-    step = max(1, int(round(src_fps / float(sample_fps))))
-    writer = None
+    line = _coerce_line(line if line is not None else line_norm)
+    if line is None:
+        return {"ok": False, "error": "Linha inválida (esperado x1,y1,x2,y2 normalizados)."}
+
+    step = _estimate_every_n_frames(fps, sample_fps)
+
+    # Saídas
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    base_out = os.path.join("outputs", stamp)
+    csv_path = os.path.join(base_out, "contagem.csv")
     annotated_path = None
+
+    writer = None
     if save_annotated:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        annotated_path = str(Path(out_dir) / (Path(video_path).stem + f"{suffix}_annotated.mp4"))
-        writer = cv2.VideoWriter(annotated_path, fourcc, max(float(sample_fps), 5.0), (width, height))
+        ensure_dirs(os.path.join(base_out, "video.mp4"))
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(os.path.join(base_out, "video.mp4"),
+                                 fourcc,
+                                 max(5.0, min(30.0, fps/step)),
+                                 (w, h))
+        annotated_path = os.path.join(base_out, "video.mp4")
 
-    # ---- Rastreamento & parâmetros anti-ruído ----
-    next_id = 1
-    tracks = {}  # tid -> Track
-    max_misses = 12
-    iou_th = 0.3
-    # Para contagem
-    min_disp_px = max(4, int(0.004 * (width + height)))   # deslocamento mínimo para considerar cruzamento
-    cooldown_frames = int(sample_fps * 0.75)              # evita dupla contagem se ficar “quicando” na linha
+    counter = LineCounter(w, h, line)
+    frames_iter = _iterate_frames(cap, step)
 
-    total_in = total_out = 0
-    timeline = []
-    frame_idx = -1
-    out_idx = -1
+    if YOLO_AVAILABLE:
+        model = YOLO("yolov8n.pt")
+        runner = _run_yolo_track_frames(model, frames_iter, counter, writer=writer)
+    else:
+        runner = _fallback_dummy(frames_iter, counter, writer=writer)
 
-    # vetor normal à linha (para assinar direção via produto escalar)
-    dx, dy = (x2 - x1, y2 - y1)
-    nx, ny = (dy, -dx)  # perpendicular
+    # janelas simples por chunk_seconds
+    win_list: List[dict] = []
+    cur_start = 0.0
+    last_in = 0
+    last_out = 0
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame_idx += 1
-        if frame_idx % step != 0:
-            continue
-        out_idx += 1
-        ts = out_idx / float(sample_fps) + float(time_offset)
+    for idx in runner:
+        t = (idx / (fps or 1.0))
+        if (t - cur_start) >= max(1, int(chunk_seconds)):
+            win_list.append({
+                "start": _fmt_s(int(cur_start)),
+                "end": _fmt_s(int(t)),
+                "in": int(counter.in_count - last_in),
+                "out": int(counter.out_count - last_out),
+            })
+            cur_start = t
+            last_in = counter.in_count
+            last_out = counter.out_count
 
-        # ---------- Detecção ----------
-        # classes=[0] -> person
-        results = model(frame, imgsz=640, classes=[0], conf=0.35, iou=0.6, verbose=False)
-        dets = []
-        if len(results):
-            b = results[0].boxes
-            if b is not None and b.xywh is not None:
-                xywh = b.xywh.cpu().numpy()
-                scores = b.conf.cpu().numpy()
-                for (cx, cy, w, h), sc in zip(xywh, scores):
-                    if sc < 0.35:
-                        continue
-                    x = float(cx - w/2); y = float(cy - h/2)
-                    dets.append([x, y, float(w), float(h)])
-
-        # ---------- Associação por IoU ----------
-        # marca todos como não atualizados
-        for trk in tracks.values():
-            trk.misses += 1  # envelhece por padrão (se atualizar, voltamos a 0)
-
-        used = set()
-        for db in dets:
-            # encontra melhor track
-            best_tid, best_iou = None, 0.0
-            for tid, trk in tracks.items():
-                if tid in used:  # um det por track
-                    continue
-                score = iou_xywh(db, trk.bbox)
-                if score > best_iou:
-                    best_iou, best_tid = score, tid
-            if best_tid is not None and best_iou >= iou_th:
-                trk = tracks[best_tid]
-                trk.update(db)
-                trk.misses = 0
-                used.add(best_tid)
-            else:
-                # cria novo track
-                cx = db[0] + db[2]/2.0
-                cy = db[1] + db[3]/2.0
-                side = 1 if point_side_of_line(cx, cy, x1, y1, x2, y2) > 0 else -1
-                tracks[next_id] = Track(next_id, db, side)
-                used.add(next_id)
-                next_id += 1
-
-        # remove tracks perdidos
-        to_del = [tid for tid,trk in tracks.items() if trk.misses > max_misses]
-        for tid in to_del:
-            del tracks[tid]
-
-        # ---------- Contagem por cruzamento de segmento ----------
-        crossed_in = 0
-        crossed_out = 0
-
-        for tid, trk in list(tracks.items()):
-            if len(trk.history) < 2:
-                continue
-
-            p_prev = trk.history[-2]
-            p_now  = trk.history[-1]
-
-            # deslocamento mínimo para evitar ruído
-            if abs(p_now[0] - p_prev[0]) + abs(p_now[1] - p_prev[1]) < min_disp_px:
-                continue
-
-            # checa se o segmento do track cruza a linha
-            if not segments_intersect((x1,y1),(x2,y2), p_prev, p_now):
-                # também aceita troca de sinal da distância assinada (mais robusto)
-                d1 = signed_distance_to_line(p_prev[0], p_prev[1], x1, y1, x2, y2)
-                d2 = signed_distance_to_line(p_now[0],  p_now[1],  x1, y1, x2, y2)
-                if d1 == 0 or d2 == 0 or (d1 > 0) == (d2 > 0):
-                    continue
-
-            # cooldown para não contar 2x
-            if trk.alive_frames - trk.last_cross_frame < cooldown_frames:
-                continue
-
-            # decide direção usando o vetor movimento projetado na normal
-            mvx, mvy = (p_now[0]-p_prev[0], p_now[1]-p_prev[1])
-            dir_sign = 1 if (mvx * nx + mvy * ny) > 0 else -1
-            # Convenção:
-            # dir_sign > 0 => IN ; dir_sign < 0 => OUT
-            if dir_sign > 0:
-                total_in += 1; crossed_in += 1
-            else:
-                total_out += 1; crossed_out += 1
-
-            trk.last_cross_frame = trk.alive_frames
-
-        timeline.append({
-            "frame": frame_idx,
-            "timeSec": round(ts, 3),
-            "detections": len(dets),
-            "crossedIn": crossed_in,
-            "crossedOut": crossed_out,
-            "cumulativeIn": total_in,
-            "cumulativeOut": total_out
+    total_secs = int(total_frames / (fps or 1.0))
+    if (counter.in_count - last_in) != 0 or (counter.out_count - last_out) != 0 or not win_list:
+        win_list.append({
+            "start": _fmt_s(int(cur_start)),
+            "end": _fmt_s(int(total_secs)),
+            "in": int(counter.in_count - last_in),
+            "out": int(counter.out_count - last_out),
         })
 
-        # ---------- Desenho ----------
-        if writer is not None:
-            draw_thick_line(frame, (x1, y1), (x2, y2), thickness=8, color=(0,255,255))
-            for tid, trk in tracks.items():
-                x, y, w, h = trk.bbox
-                p1 = (int(x), int(y)); p2 = (int(x+w), int(y+h))
-                cx, cy = int(trk.centroid()[0]), int(trk.centroid()[1])
-                cv2.rectangle(frame, p1, p2, (0,255,0), 2)
-                cv2.circle(frame, (cx, cy), 3, (255,255,255), -1)
-                put_text(frame, f"ID {tid}", (p1[0], max(0, p1[1]-6)))
-            put_text(frame, f"IN: {total_in}  OUT: {total_out}", (10, 34), scale=0.8)
-
-            writer.write(frame)
-
-    cap.release()
     if writer is not None:
         writer.release()
 
+    ensure_dirs(csv_path)
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        wcsv = csv.writer(f, delimiter=';')
+        wcsv.writerow(["start","end","in","out"])
+        for wrow in win_list:
+            wcsv.writerow([wrow["start"], wrow["end"], wrow["in"], wrow["out"]])
+
     return {
-        "video": Path(video_path).name,
-        "frameSize": {"width": width, "height": height},
-        "sourceFps": float(src_fps),
-        "sampleFps": float(sample_fps),
-        "linePx": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-        "totals": {"in": int(total_in), "out": int(total_out)},
-        "timeline": timeline,
-        "annotated_video": annotated_path
+        "ok": True,
+        "in_total": int(counter.in_count),
+        "out_total": int(counter.out_count),
+        "net_total": int(counter.in_count - counter.out_count),
+        "windows": win_list,
+        "csv_path": csv_path,
+        "annotated_path": annotated_path
     }
 
-# =================== Classe pública ===================
-class PeopleLineCounter:
-    def __init__(
-        self,
-        line_norm=(0.1, 0.5, 0.9, 0.5),
-        sample_fps=5.0,
-        save_annotated=True,
-        out_dir=Path("outputs"),
-        chunk_seconds=60,
-        workers=0,
-    ):
-        self.line_norm = line_norm
-        self.sample_fps = float(sample_fps)
-        self.save_annotated = bool(save_annotated)
-        self.out_dir = Path(out_dir)
-        self.out_dir.mkdir(exist_ok=True, parents=True)
-        self.chunk_seconds = int(chunk_seconds)
-        self.workers = int(workers)
-
-    def process(self, video_path: str):
-        if self.chunk_seconds and self.chunk_seconds > 0:
-            return self._process_parallel(video_path)
-        return process_segment(
-            video_path, self.line_norm, self.sample_fps, self.save_annotated, self.out_dir, 0.0, ""
-        )
-
-    # ---------- Streaming por chunk (mantido) ----------
-    def iter_parallel(self, video_path: str):
-        base = Path(video_path).stem
-        seg_dir = self.out_dir / f"{base}_segments"
-        seg_dir.mkdir(exist_ok=True)
-
-        segments = split_into_chunks(video_path, str(seg_dir), chunk_seconds=self.chunk_seconds)
-        if not segments:
-            raise RuntimeError("Segmentação falhou (sem segmentos).")
-
-        offsets, durs, acc = [], [], 0.0
-        for p in segments:
-            d = probe_duration(p)
-            durs.append(d)
-            offsets.append(acc)
-            acc += d
-
-        max_workers = self.workers if self.workers > 0 else (os.cpu_count() or 2)
-        results = [None] * len(segments)
-        annotated_segments = []
-
-        with ProcessPoolExecutor(max_workers=max_workers) as ex:
-            futmap = {}
-            for i, (seg, off) in enumerate(zip(segments, offsets)):
-                fut = ex.submit(
-                    process_segment,
-                    seg, self.line_norm, self.sample_fps, self.save_annotated,
-                    self.out_dir, off, f"_seg{i:03d}"
-                )
-                futmap[fut] = i
-
-            for fut in as_completed(futmap):
-                idx = futmap[fut]
-                r = fut.result()
-                results[idx] = r
-                if self.save_annotated and r.get("annotated_video"):
-                    annotated_segments.append(r["annotated_video"])
-
-                start_sec = offsets[idx]
-                end_sec   = offsets[idx] + (durs[idx] or 0.0)
-                yield {
-                    "event": "chunk_result",
-                    "index": idx,
-                    "startSec": round(float(start_sec), 3),
-                    "endSec": round(float(end_sec), 3),
-                    "in": int(r["totals"]["in"]),
-                    "out": int(r["totals"]["out"]),
-                    "annotated": r.get("annotated_video"),
-                }
-
-        total_in  = sum(r["totals"]["in"]  for r in results)
-        total_out = sum(r["totals"]["out"] for r in results)
-        timeline = []
-        for r in results:
-            timeline.extend(r["timeline"])
-
-        annotated_concat = None
-        if self.save_annotated and annotated_segments:
-            annotated_concat = str(self.out_dir / f"{base}_annotated_concat.mp4")
-            concat_videos_mp4(annotated_segments, annotated_concat)
-
-        first = results[0]
-        yield {
-            "event": "final",
-            "video": Path(video_path).name,
-            "frameSize": first["frameSize"],
-            "sourceFps": first["sourceFps"],
-            "sampleFps": float(self.sample_fps),
-            "linePx": first["linePx"],
-            "totals": {"in": int(total_in), "out": int(total_out)},
-            "timeline": timeline,
-            "annotated_video": annotated_concat,
-            "annotated_segments": annotated_segments if self.save_annotated else [],
-        }
-
-    # ---------- Execução paralela sem streaming (mantido) ----------
-    def _process_parallel(self, video_path: str):
-        base = Path(video_path).stem
-        seg_dir = self.out_dir / f"{base}_segments"
-        seg_dir.mkdir(exist_ok=True)
-        segments = split_into_chunks(video_path, str(seg_dir), chunk_seconds=self.chunk_seconds)
-        if not segments:
-            raise RuntimeError("Segmentação falhou (sem segmentos).")
-
-        offsets, acc = [], 0.0
-        for p in segments:
-            offsets.append(acc)
-            acc += probe_duration(p)
-
-        max_workers = self.workers if self.workers > 0 else (os.cpu_count() or 2)
-        results = [None] * len(segments)
-        annotated_segments = []
-
-        with ProcessPoolExecutor(max_workers=max_workers) as ex:
-            futmap = {}
-            for i, (seg, off) in enumerate(zip(segments, offsets)):
-                fut = ex.submit(
-                    process_segment,
-                    seg, self.line_norm, self.sample_fps, self.save_annotated,
-                    self.out_dir, off, f"_seg{i:03d}"
-                )
-                futmap[fut] = i
-            for fut in as_completed(futmap):
-                idx = futmap[fut]
-                r = fut.result()
-                results[idx] = r
-                if self.save_annotated and r.get("annotated_video"):
-                    annotated_segments.append(r["annotated_video"])
-
-        total_in  = sum(r["totals"]["in"]  for r in results)
-        total_out = sum(r["totals"]["out"] for r in results)
-        timeline = []
-        for r in results:
-            timeline.extend(r["timeline"])
-
-        annotated_concat = None
-        if self.save_annotated and annotated_segments:
-            annotated_concat = str(self.out_dir / f"{base}_annotated_concat.mp4")
-            concat_videos_mp4(annotated_segments, annotated_concat)
-
-        first = results[0]
-        return {
-            "video": Path(video_path).name,
-            "frameSize": first["frameSize"],
-            "sourceFps": first["sourceFps"],
-            "sampleFps": float(self.sample_fps),
-            "linePx": first["linePx"],
-            "totals": {"in": int(total_in), "out": int(total_out)},
-            "timeline": timeline,
-            "annotated_video": annotated_concat,
-            "annotated_segments": annotated_segments if self.save_annotated else [],
-        }
-
-# =================== Execução por pasta (opcional) ===================
-if __name__ == "__main__":
-    import argparse, glob, json
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--videos", nargs="*", default=[],
-                        help="Arquivos .mp4; se vazio, busca video*.mp4 no diretório atual.")
-    parser.add_argument("--line", nargs=4, type=float, default=[0.10,0.55,0.90,0.55],
-                        help="Linha normalizada x1 y1 x2 y2 (0..1)")
-    parser.add_argument("--fps", type=float, default=5.0)
-    parser.add_argument("--chunk", type=int, default=45)
-    parser.add_argument("--save-annot", action="store_true")
-    parser.add_argument("--workers", type=int, default=0)
-    parser.add_argument("--out", default="outputs")
-    args = parser.parse_args()
-
-    vids = args.videos or sorted(glob.glob("video*.mp4"))
-    plc = PeopleLineCounter(
-        line_norm=tuple(args.line),
-        sample_fps=args.fps,
-        save_annotated=args.save_annot,
-        out_dir=Path(args.out),
-        chunk_seconds=args.chunk,
-        workers=args.workers
-    )
-    summary = {}
-    for v in vids:
-        print(f"[INFO] Processando: {v}")
-        res = plc.process(v)
-        summary[Path(v).name] = res["totals"]
-        print(f"  -> IN {res['totals']['in']} | OUT {res['totals']['out']}")
-        if res.get("annotated_video"):
-            print(f"  -> anotado: {res['annotated_video']}")
-    Path(args.out).mkdir(exist_ok=True, parents=True)
-    with open(Path(args.out)/"summary.json","w",encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
-    print("[OK] summary salvo em outputs/summary.json")
+# ---------- helpers ----------
+def _fmt_s(s: int) -> str:
+    s = int(max(0, s))
+    h = s // 3600
+    m = (s % 3600) // 60
+    sec = s % 60
+    return f"{h:02d}:{m:02d}:{sec:02d}"

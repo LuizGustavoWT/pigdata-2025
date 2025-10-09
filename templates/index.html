@@ -1,3 +1,4 @@
+<!-- templates/index.html — BusSight • UI principal (pt-BR) -->
 <!doctype html>
 <html lang="pt-BR">
 <head>
@@ -5,16 +6,28 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>BusSight • Contagem de pessoas</title>
   <link rel="stylesheet" href="/static/styles.css" />
+  <style>
+    /* Overrides visuais para o print de exemplo */
+    .pill{display:inline-flex;gap:.5rem;align-items:center;border-radius:999px;padding:.25rem .75rem;font-weight:600}
+    .pill.in{background:#eaf7ef;color:#137a3a;border:1px solid #cfead7}         /* verde */
+    .pill.out{background:#fdeaea;color:#b81f2b;border:1px solid #f3c8cc}        /* vermelho */
+    .pill.total{background:#f3f3f3;color:#0b1220;border:1px solid #e1e1e1}      /* preto */
+    .downloads a{display:inline-block;margin:.25rem .5rem .25rem 0;text-decoration:none}
+    .downloads .btn{border:1px solid #d0d4da;border-radius:10px;padding:.4rem .7rem}
+    .downloads .btn.ghost{background:#f7f9fc}
+    .table-wrap tfoot td{font-weight:700;border-top:2px solid #d0d4da}
+    .status{font-weight:600}
+    .totals{display:flex;gap:1.5rem;flex-wrap:wrap;margin:.5rem 0 1rem}
+    .totals p{margin:0}
+  </style>
 </head>
 <body class="bg">
   <header class="topbar">
-    <div class="container">
-      <div class="brand">
-        <img src="/static/design.svg" alt="BusSight" class="brand-logo" />
-        <div>
-          <h1>BusSight • Contagem de pessoas</h1>
-          <small>Entradas e saídas por linha virtual</small>
-        </div>
+    <div class="container brand">
+      <img src="/static/design.svg" alt="BusSight" class="brand-logo" />
+      <div>
+        <h1>BusSight • Contagem de pessoas</h1>
+        <small>Entradas e saídas por linha virtual</small>
       </div>
     </div>
   </header>
@@ -24,183 +37,176 @@
     <section class="card">
       <h2>Vídeo e Parâmetros</h2>
 
-      <form id="formUpload">
-        <div class="field">
-          <div class="label-row">
-            <label for="video">Vídeo (MP4)</label>
-            <span class="help">Dica: foque a porta do ônibus para melhor precisão</span>
-          </div>
-          <input type="file" id="video" name="video" accept="video/mp4,video/*" required />
-        </div>
+      <!-- Upload -->
+      <div id="dropArea" class="drop">
+        <input type="file" id="video" accept=".mp4,.avi,.mkv,.mov" />
+        <p>Arraste e solte o vídeo aqui, ou clique para selecionar.</p>
+      </div>
 
-        <div class="field">
-          <div class="label-row">
-            <label>Linha de contagem</label>
-            <span class="help">Clique 2× no preview para definir | valores normalizados 0–1</span>
-          </div>
-          <div class="row gap">
-            <div class="col"><input type="number" step="0.001" min="0" max="1" id="x1" name="x1" value="0.10" aria-label="x1"></div>
-            <div class="col"><input type="number" step="0.001" min="0" max="1" id="y1" name="y1" value="0.55" aria-label="y1"></div>
-            <div class="col"><input type="number" step="0.001" min="0" max="1" id="x2" name="x2" value="0.90" aria-label="x2"></div>
-            <div class="col"><input type="number" step="0.001" min="0" max="1" id="y2" name="y2" value="0.55" aria-label="y2"></div>
-          </div>
-        </div>
+      <!-- Preview + linha -->
+      <div class="player">
+        <video id="videoPreview" controls playsinline></video>
+        <canvas id="overlay"></canvas>
+      </div>
 
-        <div class="preview" id="dropArea">
-          <video id="videoPreview" controls playsinline></video>
-          <canvas id="overlay"></canvas>
-          <!-- reposicionada e mais legível -->
-          <div class="overlay-hint">💡 Dica: clique e arraste a linha ou as pontas para ajustar</div>
-        </div>
+      <!-- Linha (inputs exigidos, sempre normalizados 0–1) -->
+      <div class="line-grid">
+        <label>X1 <input id="x1" type="number" min="0" max="1" step="0.001" value="0.2"></label>
+        <label>Y1 <input id="y1" type="number" min="0" max="1" step="0.001" value="0.8"></label>
+        <label>X2 <input id="x2" type="number" min="0" max="1" step="0.001" value="0.8"></label>
+        <label>Y2 <input id="y2" type="number" min="0" max="1" step="0.001" value="0.8"></label>
+      </div>
 
-        <details class="card subtle">
-          <summary>Opções avançadas</summary>
-          <div class="grid-2">
-            <div class="field">
-              <label for="sample_fps">Sample FPS</label>
-              <input type="number" step="0.5" min="0.5" id="sample_fps" name="sample_fps" value="5.0">
-            </div>
-            <div class="field">
-              <label for="chunk_seconds">Chunk (s)</label>
-              <input type="number" min="10" id="chunk_seconds" name="chunk_seconds" value="60">
-            </div>
-            <div class="field">
-              <label for="workers">Workers (CPU)</label>
-              <input type="number" min="0" id="workers" name="workers" value="0">
-            </div>
-            <div class="field">
-              <label class="label-row" for="save_annotated">
-                <span>Salvar vídeo anotado</span>
-              </label>
-              <input type="checkbox" id="save_annotated" name="save_annotated" checked>
-            </div>
-          </div>
-        </details>
+      <!-- Parâmetros de processamento -->
+      <div class="param-grid">
+        <label>sample_fps <input id="sample_fps" type="number" step="0.1" value="5.0"></label>
+        <label>chunk_seconds <input id="chunk_seconds" type="number" step="1" value="60"></label>
+        <label>workers <input id="workers" type="number" step="1" value="0"></label>
+        <label class="chk"><input id="save_annotated" type="checkbox" checked>Salvar vídeo anotado</label>
+      </div>
 
-        <div class="actions">
-          <button type="button" id="btnProcess" class="btn primary">Processar</button>
-          <button type="button" id="btnStream" class="btn outline">Processar (Streaming)</button>
-        </div>
-      </form>
+      <!-- Ações -->
+      <div class="actions">
+        <button id="btnProcess" class="btn">Processar</button>
+        <button id="btnStream" class="btn ghost">Processar (Streaming)</button>
+        <span id="status" class="status" role="progressbar" aria-valuemin="0" aria-valuemax="100">Pronto</span>
+      </div>
     </section>
 
-    <!-- Painel de status/resultados -->
-    <!-- Painel de status/resultados -->
-  <section class="card">
-    <h2>Status & Resultados</h2>
-
-    <!-- status já como se tivesse concluído -->
-    <div id="status" class="status" data-state="ok">
-      ✅ Processamento concluído em 3min 24s
-    </div>
-
-    <div id="results" class="results">
+    <!-- Resultados -->
+    <section class="card">
+      <h2>Resultados</h2>
       <div class="numbers">
-        <div class="pill in"><span id="inCount">128</span><small>Entraram</small></div>
-        <div class="pill out"><span id="outCount">95</span><small>Saíram</small></div>
+        <span class="pill in">IN <strong id="inCount">0</strong></span>
+        <span class="pill out">OUT <strong id="outCount">0</strong></span>
+        <span class="pill total">TOTAL <strong id="totalCount">0</strong></span>
       </div>
 
-      <div id="downloads" class="downloads">
-        <a href="#">⬇ Relatório CSV</a>
-        <a href="#" class="secondary">⬇ Vídeo anotado</a>
+      <!-- Totais destacados (também para print) -->
+      <div class="totals">
+        <p><strong>Total IN:</strong> <span style="color:#137a3a;" id="sumInTop">0</span></p>
+        <p><strong>Total OUT:</strong> <span style="color:#b81f2b;" id="sumOutTop">0</span></p>
+        <p><strong>Total MOVIMENTAÇÕES:</strong> <span style="color:#0b1220;" id="sumMovTop">0</span></p>
       </div>
 
-      <div id="windowsWrap" class="windows">
-        <h3>Agregado por janelas</h3>
+      <div id="downloads" class="downloads"></div>
+
+      <div class="windows">
+        <h3>Janelas agregadas</h3>
         <div class="table-wrap">
-          <table id="windowsTable" aria-label="Tabela de janelas">
+          <table>
             <thead>
-              <tr><th>Janela</th><th>IN</th><th>OUT</th></tr>
+              <tr><th>Início</th><th>Fim</th><th>IN</th><th>OUT</th><th>TOTAL</th></tr>
             </thead>
-            <tbody>
-              <tr><td>00:00–05:00</td><td>23</td><td>15</td></tr>
-              <tr><td>05:00–10:00</td><td>41</td><td>36</td></tr>
-              <tr><td>10:00–15:00</td><td>35</td><td>28</td></tr>
-              <tr><td>15:00–20:00</td><td>29</td><td>16</td></tr>
-            </tbody>
+            <tbody id="windowsTable"></tbody>
+            <tfoot>
+              <tr>
+                <td colspan="2">Total</td>
+                <td id="totalIn"><strong>0</strong></td>
+                <td id="totalOut"><strong>0</strong></td>
+                <td id="totalMov"><strong>0</strong></td>
+              </tr>
+            </tfoot>
           </table>
         </div>
       </div>
+    </section>
 
-      <!-- <div id="annotatedWrap" class="video-out">
-        <h3>Vídeo anotado</h3>
-        <video id="annotatedVideo" controls>
-          <source src="/video1." type="video/mp4">
-        </video>
-      </div> -->
-    </div>  
-  </section>
+    <!-- Calculadora lateral -->
+    <aside class="calc-card">
+      <h2>Calculadora de Custo</h2>
 
-  <section class="card">
-    <h2>Cálculo de Custo</h2>
-    
-    <label for="precoLitro">Preço por litro (R$):</label>
-    <input type="number" step="0.01" id="precoLitro" placeholder="Ex: 5.50"><br><br>
-
-    <div class="columns">
-      <div class="column">
-        <h3>Micro Ônibus</h3>
-        <label for="kmRodadosMicro">Km rodados no mês:</label>
-        <input type="number" id="kmRodadosMicro" placeholder="Ex: 1000"><br><br>
-
-        <label for="litrosPorKmMicro">Litros usados por km:</label>
-        <input type="number" step="0.01" id="litrosPorKmMicro" placeholder="Ex: 0.1"><br><br>
-
-        <label for="custoPorKmManutencaoMicro">Custo manutenção por km (R$):</label>
-        <input type="number" step="0.01" id="custoPorKmManutencaoMicro" placeholder="Ex: 0.50"><br><br>
-
-        <button onclick="calcularMicro()">Calcular</button>
-
-        <h3>Resultados:</h3>
-        <p><strong>Consumo total (litros):</strong> <span id="consumoTotalMicro">-</span></p>
-        <p><strong>Custo total de combustível (R$):</strong> <span id="custoTotalCombustivelMicro">-</span></p>
-        <p><strong>Custo por km (R$):</strong> <span id="custoPorKmMicro">-</span></p>
-        <p><strong>Custo total (R$):</strong> <span id="custoTotalMicro">-</span></p>   
+      <h3>Micro</h3>
+      <div class="calc-grid">
+        <label>Preço/Litro <input id="precoLitro" type="number" step="0.01" value="6.00"></label>
+        <label>KM rodados <input id="kmRodadosMicro" type="number" step="1" value="3000"></label>
+        <label>Litros/KM <input id="litrosPorKmMicro" type="number" step="0.0001" value="0.12"></label>
+        <label>Custo/KM manutenção <input id="custoPorKmManutencaoMicro" type="number" step="0.01" value="0.40"></label>
+      </div>
+      <div class="calc-box">
+        <button class="btn" onclick="calcularMicro()">Calcular Micro</button>
+        <p>Consumo total: <strong id="consumoTotalMicro">0</strong> L</p>
+        <p>Custo combustível: <strong id="custoTotalCombustivelMicro">R$ 0,00</strong></p>
+        <p>Custo/KM: <strong id="custoPorKmMicro">R$ 0,00</strong></p>
+        <p>Custo total: <strong id="custoTotalMicro">R$ 0,00</strong></p>
       </div>
 
-      <div class="column">
-        <h3>Mid Ônibus</h3>
-        <label for="kmRodadosMid">Km rodados no mês:</label>
-        <input type="number" id="kmRodadosMid" placeholder="Ex: 1000"><br><br>
-
-        <label for="litrosPorKmMid">Litros usados por km:</label>
-        <input type="number" step="0.01" id="litrosPorKmMid" placeholder="Ex: 0.1"><br><br>
-
-        <label for="custoPorKmManutencaoMid">Custo manutenção por km (R$):</label>
-        <input type="number" step="0.01" id="custoPorKmManutencaoMid" placeholder="Ex: 0.50"><br><br>
-
-        <button onclick="calcularMid()">Calcular</button>
-
-        <h3>Resultados:</h3>
-        <p><strong>Consumo total (litros):</strong> <span id="consumoTotalMid">-</span></p>
-        <p><strong>Custo total de combustível (R$):</strong> <span id="custoTotalCombustivelMid">-</span></p>
-        <p><strong>Custo por km (R$):</strong> <span id="custoPorKmMid">-</span></p>
-        <p><strong>Custo total (R$):</strong> <span id="custoTotalMid">-</span></p>   
+      <h3>Mid</h3>
+      <div class="calc-grid">
+        <label>Preço/Litro <input id="precoLitroMid" type="number" step="0.01" value="6.00"></label>
+        <label>KM rodados <input id="kmRodadosMid" type="number" step="1" value="3000"></label>
+        <label>Litros/KM <input id="litrosPorKmMid" type="number" step="0.0001" value="0.18"></label>
+        <label>Custo/KM manutenção <input id="custoPorKmManutencaoMid" type="number" step="0.01" value="0.55"></label>
       </div>
-    </div>
-        
-  </section>
-
+      <div class="calc-box">
+        <button class="btn" onclick="calcularMid()">Calcular Mid</button>
+        <p>Consumo total: <strong id="consumoTotalMid">0</strong> L</p>
+        <p>Custo combustível: <strong id="custoTotalCombustivelMid">R$ 0,00</strong></p>
+        <p>Custo/KM: <strong id="custoPorKmMid">R$ 0,00</strong></p>
+        <p>Custo total: <strong id="custoTotalMid">R$ 0,00</strong></p>
+      </div>
+    </aside>
   </main>
 
-  <footer class="footer">
-    <div class="container">
-      <span>BusSight • Contagem de pessoas</span>
-    </div>
-  </footer>
+  <div id="toasts"></div>
 
   <script src="/static/app.js"></script>
+
+  <!-- MOCK DATA para print -->
   <script>
-    // (opcional) melhorias de UX no drop/preview sem mudar sua lógica
-    const drop = document.getElementById('dropArea');
-    const file = document.getElementById('video');
-    ['dragenter','dragover'].forEach(e=>drop.addEventListener(e,(ev)=>{ev.preventDefault();drop.classList.add('is-active')}))
-    ;['dragleave','drop'].forEach(e=>drop.addEventListener(e,(ev)=>{ev.preventDefault();drop.classList.remove('is-active')}))
-    drop.addEventListener('drop', (ev)=>{
-      if(ev.dataTransfer?.files?.length){
-        file.files = ev.dataTransfer.files; file.dispatchEvent(new Event('change',{bubbles:true}));
-      }
-    });
+    (function(){
+      // Contagens gerais (exemplo)
+      const inTotal  = 37;
+      const outTotal = 29;
+      const movTotal = inTotal + outTotal;
+
+      // Topo (pills)
+      document.getElementById('inCount').textContent     = inTotal;
+      document.getElementById('outCount').textContent    = outTotal;
+      document.getElementById('totalCount').textContent  = movTotal;
+
+      // Totais destacados logo abaixo
+      document.getElementById('sumInTop').textContent  = inTotal;
+      document.getElementById('sumOutTop').textContent = outTotal;
+      document.getElementById('sumMovTop').textContent = movTotal;
+
+      // Status concluído
+      const status = document.getElementById('status');
+      status.textContent = 'Concluído • 100%';
+
+      // Downloads de exemplo
+      const downloads = document.getElementById('downloads');
+      downloads.innerHTML = `
+        <a href="#" class="btn">📥 Anotado (MP4)</a>
+        <a href="#" class="btn ghost">📊 Relatório (CSV)</a>
+        <a href="#" class="btn ghost">🧾 Sumário (PDF)</a>
+      `;
+
+      // Janelas agregadas (exemplo)
+      const rows = [
+        {ini:'08:00:00', fim:'08:15:59', IN:12, OUT:7},
+        {ini:'08:16:00', fim:'08:31:59', IN:15, OUT:10},
+        {ini:'08:32:00', fim:'08:47:59', IN:10, OUT:12}
+      ];
+      const tbody = document.getElementById('windowsTable');
+      tbody.innerHTML = rows.map(r => {
+        const total = r.IN + r.OUT;
+        return `<tr><td>${r.ini}</td><td>${r.fim}</td><td>${r.IN}</td><td>${r.OUT}</td><td>${total}</td></tr>`;
+      }).join('');
+
+      // Totais do rodapé
+      const sumIn   = rows.reduce((a,b)=>a+b.IN,0);
+      const sumOut  = rows.reduce((a,b)=>a+b.OUT,0);
+      const sumMov  = rows.reduce((a,b)=>a+b.IN+b.OUT,0);
+
+      document.getElementById('totalIn').innerHTML  = `<strong>${sumIn}</strong>`;
+      document.getElementById('totalOut').innerHTML = `<strong>${sumOut}</strong>`;
+      document.getElementById('totalMov').innerHTML = `<strong>${sumMov}</strong>`;
+
+      // Pré-preencher um frame de preview para o print (opcional)
+      const video = document.getElementById('videoPreview');
+      video.poster = '/static/preview-frame.jpg'; // se não existir, ignora
+    })();
   </script>
 </body>
 </html>
